@@ -1,5 +1,15 @@
 # conbench 0.3 - audit (2026-10-25)
 
+**Status: every item in Bad and Meh is done in conbench 0.4 (2026-10-25)** except the one
+that is a note, not a fault (CCON knowing sync-line's shape). Verified in FS-UAE 3.2.1 in CCON
+1.3.1b3 and the stock CON:: all checks ok, auto-scale sensible (its first try scaled scroll-nl
+125x on CCON because the trial had no barrier - fixed), Ctrl-C reports what was done, BASE ratios
+and the geometric mean shown; the setup lines read right on Workbench 2.05 / 68000 too (A600). The new tests are still to be chosen (the user's call).
+**Later, the user's idea:** a WhichAmiga-style machine section (CPU, chipset, board, expansion
+cards) - only from what the system already knows (exec, expansion.library's ConfigDev list,
+graphics' ChipRevBits), never by poking hardware: WhichAmiga's probes crash a PiStorm or a 060.
+
+
 A read of `conbench.e` (706 lines, `$VER: conbench 0.3 (23.7.26)`), the README and the Aminet
 readme, plus what the CCON work of October 2026 measured with it. Marks: *verified* (seen
 running), *read* (from the source), *proposed* (an idea, not tried).

@@ -7,7 +7,7 @@ WHAT IT IS
   packet interface: fifteen workloads, from plain line output and
   4K/32K block writes to colour runs, full-screen editor repaints,
   insert/delete blits and a per-line render barrier. Run it inside
-  CON:, CCON:, KingCON, ViNCEd or anything else that speaks the
+  CON:, CCON:, KingCON, ViNCEd, CTerm or anything else that speaks the
   console packet protocol; results append to one file so consoles
   can be read side by side. Written in Amiga E, a native AmigaOS
   executable. Needs AmigaOS 2.0+.
@@ -22,6 +22,16 @@ WHY ANOTHER BENCHMARK
   with a warning when the window is too narrow and the line tests
   would silently measure wrapping instead.
 
+  It times with timer.device's EClock and sizes each test itself to
+  take a second or more; shows the best and the median of the
+  repeats; asks the console where its cursor is after the tests
+  whose end state is known, so a console that loses output shows BAD
+  instead of fast; records the handler and its version, the screen,
+  depth, mode and font, the CPU as exec reports it and free memory in
+  every result (read from the system, nothing probes the hardware);
+  and gives a geometric mean, CSV output and a BASE run to compare
+  against. Ctrl-C stops it and still reports what was done.
+
 USAGE
 
   Run it IN the console you want to measure:
@@ -30,10 +40,16 @@ USAGE
     conbench CCON TO RAM:conbench.txt
     conbench CCON TO RAM:conbench.txt SYNC
 
-  NAME/A, TO/K, REPS/K/N (default 3, best-of), SCALE/K/N, SYNC/S.
-  Results under half a second are flagged '?' - raise SCALE.
+  NAME/A, TO/K, REPS/K/N (default 3), SCALE/K/N (fixed size instead
+  of auto-scaling), MINTIME/K/N (auto-scale target, default 1 s),
+  SYNC/S, CSV/K (also write one line per test), BASE/K (an earlier
+  CSV to compare against), FORCE/S.
 
 HISTORY
+
+  0.4  (25.10.26) EClock timing, auto-scale, a barrier before every
+       test, Ctrl-C, best and median, the cursor check, the setup
+       recorded, geometric mean, CSV and BASE; not comparable with 0.3
 
   0.3  (23.7.26) each test names itself in the window; own tool now
   0.2  suite doubled, six new tests, the window probe works

@@ -1,145 +1,101 @@
-/* conbench.e -- console speed benchmark for CCON:, CON: and ViNCEd
-   usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [SYNC] [FORCE]
+/* conbench.e -- a console speed benchmark for AmigaOS consoles
+   (CON:, CCON:, KingCON, ViNCEd, CTerm, ...)
+   usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [MINTIME n]
+                   [SYNC] [CSV file] [BASE file] [FORCE]
 
-   VERSION 0.3 (23.7.26) - bigger, longer, tougher, and the window
-   probe finally works. Changes against 0.1, the original nine-test
-   suite, which matter when comparing result files:
-   - the classic tests are DOUBLED in size (plain-lines 816 lines,
-     block-4k 16 blocks, bytewise 2400, scroll-nl 12000, wrap-long
-     140, sgr-colour 300 lines, cursor-pos/erase-eol 700, clear-page
-     40 pages) - a 0.2+ TOTAL is not comparable to a 0.1 TOTAL.
-   - six NEW tests: block-32k (one giant write per packet - exercises
-     any big-write slow path), sgr-perchar (a colour change before
-     EVERY glyph: run-batching's worst case), vt-frame (full-screen
-     app repaint: position + erase-line + text per row, the Ed/More
-     frame shape), insdel-line (CSI L/M region blits), insdel-char
-     (CSI @/P mid-line cell shifts), and sync-line (a WaitForChar
-     render barrier after EVERY line - the per-line cost no deferring
-     console can hide; see below).
-   - the window-size probe (X6): 0.1 wrote CSI 0 SPACE q to Output()
-     and then tried to READ THE ANSWER FROM Output() too - and every
-     console tested (stock CON: included) answered that with silence.
-     The report arrives on the console's INPUT stream: ask on out,
-     listen on Input() - the dir idiom. 0.2 does that, records the
-     size in the file, and WARNS when the window is narrower than the
-     78-column test lines, because a 77-col window silently turns
-     every line test into a wrap-and-double-scroll test (the exact
-     trap the 1.2.2 perf campaign fell into for a day).
+   VERSION 0.4 (25.10.26) - the audit's fixes (docs/audit.md). Against
+   0.3, which matters when comparing result files:
+   - timed with timer.device's EClock (about 1.4 us) instead of 1/50 s
+     DateStamp ticks; times are shown in milliseconds
+   - AUTO-SCALE: without SCALE, each test is run once to see what it
+     costs and then sized to take at least MINTIME seconds (default 1),
+     so a fast Amiga gets honest numbers without guessing a SCALE. The
+     table shows bytes per second, which does not depend on the size.
+   - an untimed barrier (WaitForChar) before EVERY stopwatch start, so a
+     console that draws behind its replies cannot leave one test's work
+     on the next test's clock (0.3 did, with SYNC off)
+   - Ctrl-C stops it between writes; the tests done so far are reported
+   - best AND median of the REPS, '~' when they disagree by over 10%
+   - a CHECK column: after the tests whose end state is known, the
+     console is asked where its cursor is (CSI 6n, outside the timing);
+     a console that lost or misparsed output shows BAD, not "fast"
+   - the setup is recorded, not left to a checklist: the console's
+     handler and version, its DISK_INFO type, the window's screen, depth,
+     mode and font, the CPU as exec reports it, exec's version, free
+     memory and how many other tasks were ready to run. All read from
+     system structures - nothing probes the hardware.
+   - a geometric mean of the rates beside TOTAL (no one row decides it)
+   - CSV file: the run as one line per test, appended; BASE file: an
+     earlier CSV whose rates are put beside this run's as ratios
+   - scroll-nl writes its newlines in 1000-byte writes (0.3 sent 10 at a
+     time, so packet cost leaked into the "pure scroll" row); clear-page
+     and cursor-pos are sized to the probed window; insdel-char cannot
+     divide by zero in a two-row window; rates cannot overflow
+   0.4 totals are NOT comparable with 0.3 ones (other sizes, scroll-nl).
 
    Run it INSIDE the console you want to measure - it writes its test
    output to stdout, so the console under test is whichever one the
-   shell is running in:
+   shell is running in. Results APPEND to the file (RAM:conbench.txt by
+   default), so several consoles' runs can be read side by side.
 
-     NewShell CCON:                       (then, in that window)
-     conbench CCON TO RAM:conbench.txt
-     NewShell CON:                        (then, in that window)
-     conbench CON: TO RAM:conbench.txt
-     NewShell ViNCEd-or-your-CON-takeover
-     conbench ViNCEd TO RAM:conbench.txt
-
-   Results APPEND to the file, so all three runs land in one place and
-   can be read side by side. NAME is just the label written into the
-   file - call it whatever you like.
-
-   ---------------------------------------------------------------
-   WHAT THIS ACTUALLY MEASURES - read this before believing a number
-   ---------------------------------------------------------------
-
-   A console is a DOS handler: Write() sends an ACTION_WRITE packet
-   and blocks until the handler replies. So what is timed here is
-   "how long the handler takes to accept and acknowledge the output".
-
-   For a console that draws before it replies, that IS drawing time.
-   CCON: worked that way up to 1.2.2b2. As of 1.2.2b4 it accepts and
-   acks writes ahead of rendering like everything else fast on this
-   platform, so its sync-off numbers are now exactly as optimistic
-   as ViNCEd's and stock CON:'s always were.
-
-   A console that replies FIRST and draws later looks faster here
-   than it feels to a user, and this benchmark cannot see past it
-   from the client side. There is no reliable cross-console "render
-   barrier" a client can ask for - which is why 0.2 adds sync-line:
-   a WaitForChar(fh, 0) after EVERY line forces the handler to
-   process the queue up to that point before answering, per line.
-   It is still not a guaranteed PIXEL barrier, but it defeats simple
-   write-behind buffering on every console the same way, so it is
-   the closest thing to an honest per-line figure the packet
-   interface allows. Compare sync-line and plain-lines: a big gap =
-   that console defers aggressively.
-
-   The SYNC switch is the honest partial answer. With SYNC, each test
-   ends with a WaitForChar(fh, 0) - a separate packet, which the
-   handler must dequeue after the writes it is already holding. It is
-   NOT a guaranteed render barrier (a handler may reply to it without
-   flushing pixels), but it is a cheap probe: if a console's numbers
-   change noticeably between a plain run and a SYNC run, that console
-   is deferring something, and its plain numbers are optimistic.
-   Run both ways before drawing conclusions.
-
-   ---------------------------------------------------------------
-   MAKING THE COMPARISON FAIR
-   ---------------------------------------------------------------
-
-   - SAME WINDOW SIZE. Wrapping and scrolling dominate several of
-     these tests, so a 80x25 window and a 80x50 window are not
-     comparable. conbench asks the console for its size and records
-     it in the file; check the three lines match before comparing.
-   - SAME SCREEN DEPTH. More bitplanes means more blitting for every
-     console. A 4-colour and a 256-colour screen are different tests.
-   - SAME FONT. topaz 8 everywhere, unless you are deliberately
-     measuring font cost.
-   - NOTHING ELSE RUNNING. Close other windows; a busy Workbench
-     steals time from whichever console is measured second.
-   - REPS n (default 3) runs the whole suite n times and keeps the
-     BEST time for each test, which is the usual defence against
-     another task stealing a slice mid-measurement.
-
-   Resolution is one system tick, 1/50 s. Any test finishing in under
-   25 ticks (half a second) is flagged with a '?' - raise SCALE and
-   re-run rather than trusting it.
+   What a console benchmark can and cannot see: README.md, "Honesty".
 */
 
-MODULE 'dos/dos', 'dos/dosextens', 'dos/datetime'
+MODULE 'dos/dos', 'dos/dosextens', 'dos/datetime', 'exec/nodes', 'exec/ports',
+       'exec/execbase', 'exec/memory', 'devices/timer', 'timer', 'graphics/gfx',
+       'graphics/displayinfo', 'intuition/intuition', 'intuition/screens',
+       'graphics/rastport'
 
 CONST BLKSZ=4096,           -> the big-write buffer
       BLKLINES=51,          -> whole 79-byte lines inside one 4K block
       BLKBYTES=4029,        -> BLKLINES * 79, the block test's write size
       BLKREPS=16,           -> so block-4k moves BLKREPS*BLKBYTES bytes
       NLINES=816,           -> = BLKREPS * BLKLINES: plain-lines moves the
-                            -> SAME bytes and the same line count, which is
-                            -> the only reason comparing the two means
-                            -> anything (0.2: both doubled together)
-      BIGSZ=32768,          -> 0.2: the block-32k buffer...
-      BIGBYTES=32706,       -> ...and its write size: 414 whole 79-byte
-                            -> lines in ONE Write() - a console with a
-                            -> big-write slow path shows it here
+                            -> SAME bytes and the same line count
+      BIGSZ=32768,          -> the block-32k buffer...
+      BIGBYTES=32706,       -> ...and its write size: 414 whole lines
       BIGREPS=2,
       LONGLINE=300,         -> the auto-wrap test's line length
-      RESSZ=8192,           -> the results text accumulated in memory
+      NLSZ=1000,            -> scroll-nl's newlines per write
+      RESSZ=16384,          -> the results text accumulated in memory
       NTESTS=15,
-      SLOWTICKS=25          -> below this a result is not trustworthy
+      MAXREPS=20,
+      MAXSCALE=2000,        -> auto-scale never goes past this
+      SHORTMS=100           -> a result under this is flagged '?'
 
 DEF out,                    -> the console under test (stdout)
     blk:PTR TO CHAR,        -> BLKSZ of printable filler
-    big:PTR TO CHAR,        -> 0.2: BIGSZ of the same filler
+    big:PTR TO CHAR,        -> BIGSZ of the same filler
     longl:PTR TO CHAR,      -> LONGLINE printable chars, no newline
+    nls:PTR TO CHAR,        -> NLSZ newlines
     res:PTR TO CHAR,        -> results text, written at the very end
-    scratch[256]:STRING,
-    best[NTESTS]:ARRAY OF LONG,
+    scratch[400]:STRING,
+    ms[300]:ARRAY OF LONG,  -> NTESTS * MAXREPS times, milliseconds
+    sc[NTESTS]:ARRAY OF LONG,   -> each test's scale
     bytes[NTESTS]:ARRAY OF LONG,
+    chk[NTESTS]:ARRAY OF LONG,  -> 0 not checked, 1 ok, 2 BAD, 3 no answer
+    chkwant[NTESTS]:ARRAY OF LONG, chkgot[NTESTS]:ARRAY OF LONG,
+    baserate[NTESTS]:ARRAY OF LONG,
+    done=0,                 -> tests with at least one rep, for the report
+    cnt[NTESTS]:ARRAY OF LONG,  -> reps finished per test
+    broke=FALSE,            -> Ctrl-C seen
     dosync=FALSE,
     cols=0, rows=0,
-    probeskip=FALSE         -> 0.2: the size line must distinguish its
-                            -> own absence: skipped is not unanswered
+    probeskip=FALSE,        -> stdin not interactive: no probes at all
+    tio=NIL:PTR TO timerequest,
+    freqk=0,                -> EClock ticks per millisecond
+    con[1200]:STRING        -> the setup lines, built before the tests
 
 PROC main() HANDLE
-  DEF rdargs, argarray:PTR TO LONG, label:PTR TO CHAR, fname:PTR TO CHAR,
-      reps, scale, p:PTR TO LONG, i, r, t, fh, ds:datestamp
+  DEF rdargs=NIL, argarray:PTR TO LONG, label:PTR TO CHAR, fname:PTR TO CHAR,
+      reps, scale, p:PTR TO LONG, i, r, t, fh, ds:datestamp, mintime,
+      csvname:PTR TO CHAR, basename:PTR TO CHAR, ev[2]:ARRAY OF LONG
 
-  argarray := [0,0,0,0,0,0]:LONG
-  rdargs := ReadArgs('NAME/A,TO/K,REPS/K/N,SCALE/K/N,SYNC/S,FORCE/S', argarray, NIL)
+  argarray := [0,0,0,0,0,0,0,0,0]:LONG
+  rdargs := ReadArgs('NAME/A,TO/K,REPS/K/N,SCALE/K/N,MINTIME/K/N,SYNC/S,CSV/K,BASE/K,FORCE/S',
+                     argarray, NIL)
   IF rdargs = NIL
-    Throw("ARG", 'usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [SYNC] [FORCE]')
+    Throw("ARG", 'usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [MINTIME n] [SYNC] [CSV file] [BASE file] [FORCE]')
   ENDIF
   label := argarray[0]
   fname := argarray[1]
@@ -149,70 +105,94 @@ PROC main() HANDLE
     p := argarray[2]
     reps := p[0]
   ENDIF
-  scale := 1
+  scale := 0                    -> 0 = auto-scale
   IF argarray[3]
     p := argarray[3]
-    scale := p[0]
+    scale := Max(1, p[0])
+  ENDIF
+  mintime := 1
+  IF argarray[4]
+    p := argarray[4]
+    mintime := Max(1, p[0])
   ENDIF
   IF reps < 1 THEN reps := 1
-  IF scale < 1 THEN scale := 1
-  dosync := argarray[4]
+  IF reps > MAXREPS THEN reps := MAXREPS
+  dosync := argarray[5]
+  csvname := argarray[6]
+  basename := argarray[7]
 
   out := Output()
-  -> Refuse a redirected run: `conbench X >file` would time the
-  -> FILESYSTEM, not the console, and produce a confident nonsense
-  -> number. FORCE exists so the thing can be smoke-tested off a real
-  -> console (under vamos, say) without pretending the result means
-  -> anything.
-  IF (IsInteractive(out) = 0) AND (argarray[5] = 0)
+  -> a redirected run would time the FILESYSTEM, not the console, and
+  -> produce a confident nonsense number; FORCE is for smoke tests only
+  IF (IsInteractive(out) = 0) AND (argarray[8] = 0)
     Throw("ARG", 'stdout is not a console - run conbench IN the console you want to measure (FORCE to override)')
   ENDIF
+
+  -> the EClock: timer.device's free-running counter, ~0.7-1.4 us a tick
+  tio := New(SIZEOF timerequest)
+  IF tio = NIL THEN Throw("MEM", 'out of memory')
+  IF OpenDevice('timer.device', UNIT_ECLOCK, tio, 0) <> 0
+    Dispose(tio)
+    tio := NIL
+    Throw("ARG", 'cannot open timer.device')
+  ENDIF
+  timerbase := Long(tio + 20)        -> io_Device
+  freqk := Div(ReadEClock(ev) + 500, 1000)
+  IF freqk < 1 THEN freqk := 1
 
   blk := New(BLKSZ + 4)
   big := New(BIGSZ + 4)
   longl := New(LONGLINE + 4)
+  nls := New(NLSZ + 4)
   res := String(RESSZ)
-  IF (blk = NIL) OR (big = NIL) OR (longl = NIL) OR (res = NIL) THEN Throw("MEM", 'out of memory')
+  IF (blk = NIL) OR (big = NIL) OR (longl = NIL) OR (nls = NIL) OR (res = NIL)
+    Throw("MEM", 'out of memory')
+  ENDIF
   fillbuffers()
 
-  -> the window size, asked of the console itself. Done ONCE, before
-  -> any timing, so whatever it costs (CCON: takes an alternate-screen
-  -> snapshot on the cooked->raw switch, for instance) is paid outside
-  -> every measured region and by all three consoles alike.
+  -> the window size and the setup, asked ONCE before any timing, so
+  -> whatever they cost is paid outside every measured region
   winsize()
-
+  setup()
   FOR i := 0 TO NTESTS - 1
-    best[i] := -1
+    sc[i] := IF scale THEN scale ELSE 1
     bytes[i] := 0
+    chk[i] := 0
+    cnt[i] := 0
+    baserate[i] := 0
   ENDFOR
+  IF basename THEN readbase(basename)
 
-  -> the suite, REPS times, keeping the best time per test
-  FOR r := 1 TO reps
+  -> AUTO-SCALE: one run of each test at scale 1 says what it costs;
+  -> it is then sized to take at least MINTIME seconds
+  IF scale = 0
+    FOR i := 0 TO NTESTS - 1 DO IF broke = FALSE THEN sc[i] := calibrate(i, Mul(mintime, 1000))
+  ENDIF
+
+  -> the suite, REPS times; a test's row is complete when all its reps ran
+  FOR r := 0 TO reps - 1
     FOR i := 0 TO NTESTS - 1
-      t := timetest(i, scale)
-      IF (best[i] < 0) OR (t < best[i]) THEN best[i] := t
+      IF broke = FALSE
+        ms[Mul(i, MAXREPS) + r] := timetest(i, sc[i])
+        IF broke = FALSE
+          cnt[i] := r + 1
+          IF r = 0 THEN done := i + 1
+          IF r = (reps - 1) THEN check(i)   -> outside the timing, last rep
+        ENDIF
+      ENDIF
     ENDFOR
   ENDFOR
 
-  -> back to a clean screen before the summary, so the numbers are
-  -> readable and the next run starts from the same state
+  -> back to a clean screen before the summary
   Write(out, [27,"[","0","m",12]:CHAR, 5)
 
   DateStamp(ds)
-  report(label, reps, scale, ds)
+  report(label, reps, scale, mintime, ds)
 
-  -> the file is opened and written only NOW: no disk I/O of ours
+  -> the files are opened and written only NOW: no disk I/O of ours
   -> happened between or during the timed regions
-  fh := Open(fname, MODE_READWRITE)
-  IF fh
-    Seek(fh, 0, OFFSET_END)
-  ELSE
-    fh := Open(fname, MODE_NEWFILE)
-  ENDIF
-  IF fh = NIL THEN Throw("DOS", IoErr())
-  Write(fh, res, StrLen(res))
-  Close(fh)
-
+  appendto(fname, res)
+  IF csvname THEN writecsv(csvname, label, ds)
   WriteF('\nconbench: appended to \s\n', fname)
 
 EXCEPT DO
@@ -221,19 +201,33 @@ EXCEPT DO
   ELSEIF exception <> 0
     WriteF('conbench: \s\n', exceptioninfo)
   ENDIF
+  IF tio
+    CloseDevice(tio)
+    Dispose(tio)
+  ENDIF
   IF rdargs THEN FreeArgs(rdargs)
 ENDPROC
 
+PROC appendto(name, text:PTR TO CHAR)
+  DEF fh
+  fh := Open(name, MODE_READWRITE)
+  IF fh
+    Seek(fh, 0, OFFSET_END)
+  ELSE
+    fh := Open(name, MODE_NEWFILE)
+  ENDIF
+  IF fh = NIL THEN Throw("DOS", IoErr())
+  Write(fh, text, StrLen(text))
+  Close(fh)
+ENDPROC
+
 -> printable filler. Deliberately VARIED, not one repeated character:
--> a console that batches identical glyphs, or a Text() call on a run
--> of spaces, is not doing the work a real listing asks for.
+-> a console that batches identical glyphs is not doing a listing's work
 PROC fillbuffers()
   DEF i, c
   c := 33
   FOR i := 0 TO BLKSZ - 1
-    -> lay it out as 78-char lines so the block test scrolls the same
-    -> number of times the line test does, for the same byte count
-    IF Mod(i, 79) = 78
+    IF Mod(i, 79) = 78          -> 78-char lines, as the line test
       blk[i] := 10
     ELSE
       blk[i] := c
@@ -243,7 +237,7 @@ PROC fillbuffers()
   ENDFOR
   blk[BLKSZ] := 0
   c := 33
-  FOR i := 0 TO BIGSZ - 1      -> 0.2: same 79-byte-line layout, 32K of it
+  FOR i := 0 TO BIGSZ - 1
     IF Mod(i, 79) = 78
       big[i] := 10
     ELSE
@@ -260,53 +254,70 @@ PROC fillbuffers()
     IF c > 126 THEN c := 33
   ENDFOR
   longl[LONGLINE] := 0
+  FOR i := 0 TO NLSZ - 1 DO nls[i] := 10
+  nls[NLSZ] := 0
 ENDPROC
 
 -> ---------------------------------------------------------------
--> timing. DateStamp gives days/minutes/ticks at 50 ticks a second;
--> the delta is computed in ticks and stays well inside a LONG for
--> anything short of a two-week benchmark.
+-> timing: the EClock, read before and after; the low longword's
+-> difference is exact for anything under ~50 minutes
 -> ---------------------------------------------------------------
-PROC stampticks(a:PTR TO datestamp, b:PTR TO datestamp)
-  DEF dm
-  dm := (Mul(b.days - a.days, 1440)) + (b.minute - a.minute)
-ENDPROC Mul(dm, 3000) + (b.tick - a.tick)
+PROC nowticks()
+  DEF ev[2]:ARRAY OF LONG
+  ReadEClock(ev)
+ENDPROC ev[1]
 
-PROC timetest(id, scale)
-  DEF t0:datestamp, t1:datestamp, n, ban[48]:STRING
-  -> start every test from a cleared screen and default colours, so
-  -> one test cannot leave the console in a state that changes the
-  -> next one's cost (a left-over colour, a scrolled-up prompt)
+PROC brk()
+  IF broke THEN RETURN TRUE
+  IF CheckSignal(SIGBREAKF_CTRL_C) THEN broke := TRUE
+ENDPROC broke
+
+-> AUTO-SCALE: the scale that makes test id take target ms. Measured
+-> WITH an end barrier even when SYNC is off: a console that answers
+-> before it draws made 0.4's first try look almost free and scaled
+-> scroll-nl 125 times (30 s). Scaled up tenfold until the trial is long
+-> enough to extrapolate from (0.2 s), then to the target.
+PROC calibrate(id, target)
+  DEF s=1, t
+  LOOP
+    t := timetest(id, s, TRUE)
+    IF broke THEN RETURN s
+    IF (t >= 200) OR (s >= MAXSCALE) THEN RETURN Min(MAXSCALE, Max(1, Div(Mul(s, target) + t - 1, Max(t, 1))))
+    s := Min(MAXSCALE, Mul(s, 10))
+  ENDLOOP
+ENDPROC
+
+-> one test at one scale; milliseconds. bar: end with a barrier even
+-> without SYNC (calibration)
+PROC timetest(id, scale, bar=FALSE)
+  DEF t0, t1, n, ban[48]:STRING
+  -> every test starts from a cleared screen and default colours
   Write(out, [27,"[","0","m",12]:CHAR, 5)
-  -> 0.3: name the running test IN the window, after the clear and
-  -> BEFORE the stopwatch - untimed, and it answers the "is it hung?"
-  -> stare that scroll-nl and insdel-line otherwise earn: both write
-  -> nothing visible BY DESIGN (blank lines over a cleared screen,
-  -> insert/delete of empty rows), and before the 1.2.2 handler work
-  -> scroll-nl was three straight minutes of exactly that. The banner
-  -> costs one line of start-state, identical for every console and
-  -> every test; scrolling tests shed it in the first instants, the
-  -> mid-screen tests keep it visible for their whole run.
+  -> name the test IN the window, before the stopwatch (scroll-nl and
+  -> insdel-line draw nothing visible by design)
   StringF(ban, 'conbench: \s ...\n', testname(id))
   Write(out, ban, StrLen(ban))
-  DateStamp(t0)
+  -> 0.4: the untimed barrier. A console that answers writes before it
+  -> draws must finish the clear, the banner and anything left from the
+  -> previous test BEFORE the clock starts, or it lands on this test
+  WaitForChar(out, 0)
+  IF brk() THEN RETURN 0
+  t0 := nowticks()
   n := dotest(id, scale)
-  IF dosync THEN WaitForChar(out, 0)
-  DateStamp(t1)
+  IF dosync OR bar THEN WaitForChar(out, 0)
+  t1 := nowticks()
   bytes[id] := n
-ENDPROC stampticks(t0, t1)
+ENDPROC Div(t1 - t0, freqk)
 
 -> ---------------------------------------------------------------
--> the workloads. Each returns the number of bytes it wrote.
--> Sizes are chosen so a stock CON: takes roughly half a second to a
--> few seconds each on an 030; SCALE multiplies them if your machine
--> is quick enough to finish one under SLOWTICKS.
+-> the workloads. Each returns the number of bytes it wrote; each
+-> stops at a Ctrl-C (checked every 256 writes).
 -> ---------------------------------------------------------------
 PROC dotest(id, scale)
   DEF i, j, n=0, s[80]:STRING, k, line2[280]:STRING, fr, fc, tmp[24]:STRING
 
-  -> vt-frame and friends adapt to the PROBED window; a console that
-  -> did not answer gets the classic 77x24 assumption
+  -> the window-sized tests use the PROBED window; a console that did
+  -> not answer gets the classic 77x24
   fr := IF rows > 1 THEN rows ELSE 24
   fc := IF cols > 1 THEN cols ELSE 77
   IF fr > 50 THEN fr := 50
@@ -314,64 +325,53 @@ PROC dotest(id, scale)
 
   SELECT id
   CASE 0
-    -> PLAIN: 78-char lines, ONE Write() per line. The ordinary shape
-    -> of command output, and the number most people mean by "is my
-    -> console fast". Per-packet cost is included, once per line.
+    -> PLAIN: 78-char lines, ONE Write() per line - ordinary command
+    -> output, the number most people mean by "is my console fast"
     FOR i := 1 TO Mul(NLINES, scale)
       Write(out, blk, 79)
       n := n + 79
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 1
-    -> BLOCK: the SAME bytes and the same number of line breaks, but
-    -> handed over in 4K writes. Comparing this against PLAIN
-    -> separates per-packet overhead from per-character rendering:
-    -> if BLOCK is much faster, the console's fixed cost per write
-    -> dominates; if they are close, it is all drawing.
+    -> BLOCK: the SAME bytes and line breaks in 4K writes - against
+    -> PLAIN, per-packet cost apart from drawing cost
     FOR i := 1 TO Mul(BLKREPS, scale)
       Write(out, blk, BLKBYTES)
       n := n + BLKBYTES
+      IF brk() THEN RETURN n
     ENDFOR
   CASE 2
-    -> BLOCK-32K (0.2): 414 lines in ONE Write(). A console that
-    -> special-cases big writes (a bounded copy buffer, a synchronous
-    -> slow path) is caught between this and block-4k.
+    -> BLOCK-32K: 414 lines in ONE Write() - big-write slow paths
     FOR i := 1 TO Mul(BIGREPS, scale)
       Write(out, big, BIGBYTES)
       n := n + BIGBYTES
+      IF brk() THEN RETURN n
     ENDFOR
   CASE 3
-    -> BYTEWISE: one Write() per character. Brutal, and not artificial
-    -> - it is exactly what a program using unbuffered single-character
-    -> output does, and More reads and echoes this way. Almost pure
-    -> packet round-trip cost.
+    -> BYTEWISE: one Write() per character - unbuffered output, More's
+    -> echo; nearly pure packet round trip
     FOR i := 1 TO Mul(2400, scale)
       Write(out, blk + Mod(i, 78), 1)
       n := n + 1
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 4
-    -> SCROLL: bare newlines in one big write. Isolates the scroll
-    -> path (ScrollRaster plus whatever bookkeeping the console does
-    -> per line) from glyph drawing entirely.
+    -> SCROLL: bare newlines in 1000-byte writes - the scroll path with
+    -> no glyphs and few packets (0.3 wrote 10 at a time)
     FOR i := 1 TO Mul(12, scale)
-      FOR j := 1 TO 100
-        Write(out, '\n\n\n\n\n\n\n\n\n\n', 10)
-        n := n + 10
-      ENDFOR
+      Write(out, nls, NLSZ)
+      n := n + NLSZ
+      IF brk() THEN RETURN n
     ENDFOR
   CASE 5
-    -> WRAP: 300-character lines with no newline, so the console must
-    -> wrap them itself. CCON: also updates its soft-wrap plane here,
-    -> which is what lets it re-flow on resize - a cost stock CON:
-    -> pays differently and ViNCEd not at all in the same way.
+    -> WRAP: 300-character lines without newlines, wrapped by the console
     FOR i := 1 TO Mul(140, scale)
       Write(out, longl, LONGLINE)
       n := n + LONGLINE
+      IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 6
-    -> SGR: colour changes several times per line. Every console has
-    -> to split the line into runs and change pens between them; this
-    -> is the `ls` colour case, and CCON: additionally stores an
-    -> attribute per cell for its scrollback.
+    -> SGR: colour changes several times per line - the `ls` colours case
     FOR i := 1 TO Mul(300, scale)
       FOR k := 0 TO 7
         StringF(s, '\c[3\dm12345678', 27, k)
@@ -380,12 +380,10 @@ PROC dotest(id, scale)
       ENDFOR
       Write(out, '\n', 1)
       n := n + 1
+      IF (i AND 31) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 7
-    -> SGR-PERCHAR (0.2): a colour change before EVERY glyph - run
-    -> length one, the worst case for any run-batching renderer and
-    -> for per-cell attribute storage alike. One Write() per line so
-    -> the packet count stays civilised; the parser does the work.
+    -> SGR-PERCHAR: a colour change before EVERY glyph - run length one
     FOR i := 1 TO Mul(60, scale)
       StrCopy(line2, '')
       FOR k := 0 TO 39
@@ -395,92 +393,84 @@ PROC dotest(id, scale)
       StrAdd(line2, '\n')
       Write(out, line2, StrLen(line2))
       n := n + StrLen(line2)
+      IF (i AND 31) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 8
-    -> CURSOR: absolute positioning then a short string, the shape a
-    -> full-screen editor draws in. Tests the CSI parser and random
-    -> access to the grid rather than sequential appending.
+    -> CURSOR: absolute positioning then a short string, as an editor
+    -> draws - sized to the window (0.4)
     FOR i := 1 TO Mul(700, scale)
-      StringF(s, '\c[\d;\dH-cursor-', 27, Mod(i, 20) + 1, Mod(i, 60) + 1)
+      StringF(s, '\c[\d;\dH-cursor-', 27, Mod(i, fr) + 1, Mod(i, Max(1, fc - 8)) + 1)
       Write(out, s, StrLen(s))
       n := n + StrLen(s)
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 9
-    -> VT-FRAME (0.2): a full-screen application repaint - position,
-    -> erase to EOL, a row of text, for every row, one Write() per
-    -> row, then the next frame. This is what Ed scrolling a page or
-    -> More redrawing feels like, and it exercises the CSI dispatch
-    -> and any flush-before-pixel-ops seam a deferring console has.
+    -> VT-FRAME: a full-screen repaint - position, erase to EOL, a row of
+    -> text, for every row; one Write() per row, then the next frame
     FOR i := 1 TO Mul(15, scale)
       FOR j := 1 TO fr
         StringF(s, '\c[\d;1H\c[K', 27, j, 27)
         k := StrLen(s)
-        -> row text from longl, NOT blk: blk embeds a \n every 79th
-        -> byte and a stray newline here would add scrolls and break
-        -> the frame shape
         CopyMem(longl + Mod(Mul(j, 7) + i, 240), s + k, Min(60, fc - 1))
         SetStr(s, k + Min(60, fc - 1))
         Write(out, s, StrLen(s))
         n := n + StrLen(s)
       ENDFOR
+      IF brk() THEN RETURN n
     ENDFOR
   CASE 10
-    -> INSDEL-LINE (0.2): insert a line mid-screen, delete it again -
-    -> two half-window region blits per iteration, the shape editors
-    -> use for line open/close. No console can defer past these: they
-    -> read the live pixels.
-    StringF(tmp, '\c[\d;1H', 27, Div(fr, 2))
+    -> INSDEL-LINE: insert a line mid-screen, delete it again - region
+    -> blits no console can defer past
+    StringF(tmp, '\c[\d;1H', 27, Max(1, Div(fr, 2)))
     FOR i := 1 TO Mul(100, scale)
       StrCopy(line2, tmp)
       StringF(s, '\c[L\c[M', 27, 27)
       StrAdd(line2, s)
       Write(out, line2, StrLen(line2))
       n := n + StrLen(line2)
+      IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 11
-    -> INSDEL-CHAR (0.2): CSI @/P - open a gap mid-line, close it
-    -> again. Row-tail cell shifts, the word-processor idiom.
+    -> INSDEL-CHAR: CSI @/P open and close a mid-line gap (0.4: a window
+    -> of two rows no longer divides by zero)
     FOR i := 1 TO Mul(200, scale)
       StringF(line2, '\c[\d;5Habcdefgh\c[\d;5H\c[4@\c[4P', 27,
-              Mod(i, fr - 2) + 2, 27, Mod(i, fr - 2) + 2, 27, 27)
+              Mod(i, Max(1, fr - 2)) + 2, 27, Mod(i, Max(1, fr - 2)) + 2, 27, 27)
       Write(out, line2, StrLen(line2))
       n := n + StrLen(line2)
+      IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   CASE 12
-    -> CLEAR: form feed then a screenful. This is the More page-flip
-    -> path - the one CCON: 1.2 fixed - and it is worth its own number
-    -> because a console that clears slowly feels slow at exactly the
-    -> moment a user is waiting to read something.
+    -> CLEAR: form feed then a screenful - the More page flip (0.4: a
+    -> screenful of THIS window, rows less one, so it does not scroll)
     FOR i := 1 TO Mul(40, scale)
       Write(out, [12]:CHAR, 1)
       n := n + 1
-      FOR j := 1 TO 20
+      FOR j := 1 TO Max(1, fr - 1)
         Write(out, blk, 79)
         n := n + 79
       ENDFOR
+      IF brk() THEN RETURN n
     ENDFOR
   CASE 13
-    -> ERASE-EOL: carriage return, text, erase to end of line - the
-    -> progress-bar / percentage-counter idiom that rewrites one row
-    -> over and over without scrolling.
+    -> ERASE-EOL: CR, text, erase to end of line - the progress counter
     FOR i := 1 TO Mul(700, scale)
       StringF(s, '\cworking: \d%\c[K', 13, Mod(i, 100), 27)
       Write(out, s, StrLen(s))
       n := n + StrLen(s)
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
     Write(out, '\n', 1)
     n := n + 1
   CASE 14
-    -> SYNC-LINE (0.2): plain-lines with a WaitForChar(fh, 0) barrier
-    -> after EVERY line. The wait packet must dequeue behind the write
-    -> it follows, so a write-behind console has to catch up line by
+    -> SYNC-LINE: plain-lines with a WaitForChar barrier after EVERY
     -> line - the closest the packet interface gets to an honest
-    -> per-line figure, on every console alike. Compare against
-    -> plain-lines: the gap IS the deferral.
+    -> per-line figure; the gap to plain-lines IS the deferral
     FOR i := 1 TO Mul(200, scale)
       Write(out, blk, 79)
       WaitForChar(out, 0)
       n := n + 79
+      IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
   ENDSELECT
 ENDPROC n
@@ -508,117 +498,433 @@ PROC testname(id)
 ENDPROC s
 
 -> ---------------------------------------------------------------
--> ask the console how big it is: CSI 0 SPACE q, answered on the
--> INPUT stream as CSI 1;1;rows;cols SPACE r. Every console in the
--> family supports it - it is how stock `dir` learns it can do
--> columns - but a console that does NOT answer must not hang us,
--> so every read is gated behind WaitForChar with a timeout and the
--> whole thing gives up after a second.
--> X6 fix (0.2): version 0.1 sent the request on Output() and then
--> tried to WaitForChar/Read the ANSWER from Output() as well - and
--> every console tested, stock CON: included, answered with silence.
--> The report is INPUT-stream data: ask on out, listen on Input(),
--> the way dir does it. Raw mode is set on the INPUT handle for the
--> same reason - that is the side being read byte-by-byte.
+-> asking the console: a report request on Output(), the answer read
+-> from Input() in raw mode (the dir idiom), every byte gated by a
+-> half-second WaitForChar so a console that does not answer cannot
+-> hang us. Returns the reply's length (0 = no answer), stops at the
+-> final byte fin.
 -> ---------------------------------------------------------------
-PROC winsize()
-  DEF b[80]:ARRAY OF CHAR, n=0, c, got=FALSE, i, v, fld, done=FALSE, in,
-      dig=FALSE
-
+PROC ask(req:PTR TO CHAR, reqlen, fin, b:PTR TO CHAR, max)
+  DEF n=0, in, done=FALSE, got=FALSE
   in := Input()
-  IF IsInteractive(in) = 0        -> redirected stdin (Execute Command,
-    probeskip := TRUE             -> scripts): no probe, and the report
-    RETURN                        -> says SKIPPED, not unanswered
-  ENDIF
-  SetMode(in, 1)                  -> raw: bytes arrive as they come
-  Write(out, [27,"[","0",32,"q"]:CHAR, 5)
-  WHILE (done = FALSE) AND (n < 78)
-    IF WaitForChar(in, 500000) = 0     -> half a second per byte, plenty
+  SetMode(in, 1)
+  Write(out, req, reqlen)
+  WHILE (done = FALSE) AND (n < max)
+    IF WaitForChar(in, 500000) = 0
+      done := TRUE
+    ELSEIF Read(in, b + n, 1) <> 1
       done := TRUE
     ELSE
-      IF Read(in, b + n, 1) <> 1
+      n := n + 1
+      IF b[n - 1] = fin
         done := TRUE
-      ELSE
-        c := b[n]
-        n := n + 1
-        -> the report ends with 'r'; accept the 8-bit and 7-bit forms
-        -> of everything before it without caring which arrived
-        IF c = "r"
-          done := TRUE
-          got := TRUE
-        ENDIF
+        got := TRUE
       ENDIF
     ENDIF
   ENDWHILE
   SetMode(in, 0)
-  IF got = FALSE THEN RETURN
-  -> pull rows and cols out of the report: 1;1;rows;cols[;pixw;pixh] r
-  -> - numeric field 2 is rows, field 3 is cols. Third parser, each
-  -> predecessor convicted by hardware (23.7.26):
-  -> parser #1 latched cols only at the FINAL byte - but 3.2-family replies
-  ->     append pixel fields, so cols ends at a ';' and was lost (rows
-  ->     survived: its boundary IS a ';'). Fingerprint: vt-frame sized
-  ->     itself to 29/29/28 probed rows under a "?x?" header.
-  -> parser #2 advanced the field count on EVERY non-digit - and the CSI
-  ->     introducer became a phantom field, shifting everything one
-  ->     slot: "window: 29x1" = rows sitting in the cols seat, and
-  ->     vt-frame painted 28 wide off the bogus cols (his screenshot).
-  -> parser #3 (shipping): a field EXISTS only where digits were seen. Intro bytes, the
-  -> pre-terminator space and the final 'r' close nothing unless a
-  -> digit run is actually open - so both intro forms (8-bit CSI,
-  -> 7-bit ESC [) and both tails (space-r, extra fields) parse alike.
-  fld := 0
-  v := 0
-  dig := FALSE
+ENDPROC IF got THEN n ELSE 0
+
+-> the numeric fields of a reply, in order: a field exists only where
+-> digits were seen (intro bytes and the final byte close nothing)
+PROC fields(b:PTR TO CHAR, n, f:PTR TO LONG, maxf)
+  DEF i, c, v=0, dig=FALSE, k=0
   FOR i := 0 TO n - 1
     c := b[i]
     IF (c >= "0") AND (c <= "9")
       v := Mul(v, 10) + (c - 48)
       dig := TRUE
     ELSE
-      IF dig
-        IF fld = 2 THEN rows := v
-        IF fld = 3 THEN cols := v
-        fld := fld + 1
+      IF dig AND (k < maxf)
+        f[k] := v
+        k++
       ENDIF
       v := 0
       dig := FALSE
     ENDIF
   ENDFOR
+ENDPROC k
+
+-> the window size: CSI 0 SPACE q, answered CSI 1;1;rows;cols[;...] SPACE r
+PROC winsize()
+  DEF b[80]:ARRAY OF CHAR, n, f[6]:ARRAY OF LONG, k
+  IF IsInteractive(Input()) = 0   -> redirected stdin: no probes, and the
+    probeskip := TRUE             -> report says SKIPPED, not unanswered
+    RETURN
+  ENDIF
+  n := ask([27,"[","0",32,"q"]:CHAR, 5, "r", b, 78)
+  IF n = 0 THEN RETURN
+  k := fields(b, n, f, 6)
+  IF k >= 4
+    rows := f[2]
+    cols := f[3]
+  ELSEIF k = 3
+    rows := f[2]
+  ENDIF
+ENDPROC
+
+-> the cursor: CSI 6n, answered CSI row;col R. Returns row*1000+col.
+PROC cursorat()
+  DEF b[40]:ARRAY OF CHAR, n, f[4]:ARRAY OF LONG
+  n := ask([27,"[","6","n"]:CHAR, 4, "R", b, 38)
+  IF n = 0 THEN RETURN 0
+  IF fields(b, n, f, 4) < 2 THEN RETURN 0
+ENDPROC Mul(f[0], 1000) + f[1]
+
+-> ---------------------------------------------------------------
+-> the CHECK column (0.4): tests whose end state is known are asked
+-> where the cursor is. Only in a window the tests fit (the probe
+-> answered, at most 50 rows - the tests size themselves to 50).
+-> ---------------------------------------------------------------
+PROC check(id)
+  DEF fr, fc, want=0, n, got, loose=FALSE
+  IF probeskip OR (rows < 4) OR (cols < 20) OR (rows > 50) THEN RETURN
+  fr := rows
+  fc := Min(cols, 79)
+  n := sc[id]
+  SELECT id
+  CASE 0;  loose := TRUE    -> the scrolling tests end in column 1 on some
+  CASE 1;  loose := TRUE    -> row of the window: a console that scrolls in
+  CASE 2;  loose := TRUE    -> jumps (CCON) leaves the cursor above the
+  CASE 4;  loose := TRUE    -> bottom row until it settles, so the row is
+  CASE 6;  loose := TRUE    -> not checked
+  CASE 7;  loose := TRUE
+  CASE 14; loose := TRUE
+  CASE 8
+    -> the last '-cursor-' was written at row/col of i = 700*scale
+    want := Mul(Mod(Mul(700, n), fr) + 1, 1000) + Mod(Mul(700, n), Max(1, fc - 8)) + 1 + 8
+  CASE 9;  want := Mul(fr, 1000) + 1 + Min(60, fc - 1)
+  CASE 11; want := Mul(Mod(Mul(200, n), Max(1, fr - 2)) + 2, 1000) + 5
+  CASE 12
+    -> a page from row 1, a LF a line - only where the 78-char lines fit
+    IF cols < 79 THEN RETURN
+    want := Mul(Max(1, fr - 1) + 1, 1000) + 1
+  CASE 13; want := 3001                -> the banner is row 1; row 2, then LF
+  DEFAULT; RETURN                      -> bytewise, wrap-long, insdel-line:
+  ENDSELECT                            -> end states consoles may differ on
+  got := cursorat()
+  chkwant[id] := want
+  chkgot[id] := got
+  IF got = 0
+    chk[id] := 3
+  ELSEIF loose
+    chkwant[id] := 1        -> shown as "row 0;1" = any row, column 1
+    chk[id] := IF (Mod(got, 1000) = 1) AND (Div(got, 1000) >= 1) AND
+                  (Div(got, 1000) <= fr) THEN 1 ELSE 2
+  ELSEIF got = want
+    chk[id] := 1
+  ELSE
+    chk[id] := 2
+  ENDIF
 ENDPROC
 
 -> ---------------------------------------------------------------
--> the report. Built in memory, written to the file in one go.
+-> the setup (0.4), read from system structures only - nothing here
+-> probes hardware: exec's AttnFlags and version, AvailMem, the DOS
+-> device list, and the console's own DISK_INFO answer (whose
+-> id_VolumeNode is the console's window, the stock convention)
 -> ---------------------------------------------------------------
+PROC setup()
+  DEF fh:PTR TO filehandle, port:PTR TO mp, task:PTR TO ln, id:PTR TO infodata,
+      win:PTR TO window, scr:PTR TO screen, font, af, cpu:PTR TO CHAR,
+      dl:PTR TO doslist, hname[120]:STRING, hver[80]:STRING, dtype[8]:STRING,
+      dev[40]:STRING, ni[56]:ARRAY OF CHAR, mid, depth, bm, rdy=0, n:PTR TO ln,
+      i, c, s:PTR TO CHAR, mname[40]:STRING, fname[40]:STRING, line[120]:STRING
+  StrCopy(con, '')
+  -> the console's handler: the task behind Output()'s port, and the DOS
+  -> device whose task that port is (its handler file, if it has one)
+  fh := Shl(out, 2)
+  port := fh.type
+  StrCopy(dev, '?')
+  StrCopy(hname, '')
+  StrCopy(hver, '')
+  IF port
+    task := port.sigtask
+    IF task THEN IF task.name THEN StrCopy(dev, task.name)
+    dl := LockDosList(LDF_DEVICES OR LDF_READ)
+    WHILE dl := NextDosEntry(dl, LDF_DEVICES)
+      IF dl.task = port
+        s := Shl(dl.handler, 2)
+        IF s
+          c := s[0]
+          FOR i := 0 TO Min(c, 110) - 1 DO hname[i] := s[i + 1]
+          SetStr(hname, Min(c, 110))
+        ENDIF
+      ENDIF
+    ENDWHILE
+    UnLockDosList(LDF_DEVICES OR LDF_READ)
+  ENDIF
+  IF StrLen(hname) THEN fileversion(hname, hver)
+  StringF(line, 'handler : \s (\s\s\s)\n', dev,
+          IF StrLen(hname) THEN hname ELSE 'in ROM or built in',
+          IF StrLen(hver) THEN ', ' ELSE '', hver)
+  StrAdd(con, line)
+  -> its DISK_INFO: the type it claims and its window
+  win := NIL
+  StrCopy(dtype, '?')
+  id := New(SIZEOF infodata)
+  IF id AND (port <> NIL)
+    IF DoPkt(port, ACTION_DISK_INFO, Shr(id, 2), 0, 0, 0, 0)
+      FOR i := 0 TO 3
+        c := Shr(id.disktype, Mul(3 - i, 8)) AND 255
+        dtype[i] := IF (c >= 32) AND (c < 127) THEN c ELSE "."
+      ENDFOR
+      SetStr(dtype, 4)
+      win := id.volumenode
+    ENDIF
+  ENDIF
+  IF id THEN Dispose(id)
+  StrCopy(mname, '?')
+  StrCopy(fname, '?')
+  IF win
+    scr := win.wscreen
+    IF scr
+      bm := Long(scr + 84 + 4)        -> sc_RastPort (84) -> rp_BitMap
+      -> GetBitMapAttr is graphics V39 (3.0); conbench runs from 2.0, where
+      -> the planar BitMap's own Depth byte (offset 5) is the answer
+      IF Int(gfxbase + 20) >= 39
+        depth := GetBitMapAttr(bm, BMA_DEPTH)
+      ELSE
+        depth := Char(bm + 5)
+      ENDIF
+      mid := GetVPModeID(scr + 44)    -> sc_ViewPort (44): an embedded member
+      IF GetDisplayInfoData(NIL, ni, 56, DTAG_NAME, mid) > 16
+        StrCopy(mname, ni + 16)
+      ENDIF
+      StringF(line, 'screen  : \dx\d, depth \d, mode \s ($\h)\n',
+              scr.width, scr.height, depth, mname, mid)
+      StrAdd(con, line)
+    ENDIF
+    font := win.rport.font
+    IF font
+      s := Long(font + 10)            -> tf_Message.mn_Node.ln_Name
+      IF s THEN StrCopy(fname, s)
+      StringF(line, 'font    : \s \d (\dx\d)\n', fname, Int(font + 20),
+              Int(font + 24), Int(font + 20))
+      StrAdd(con, line)
+    ENDIF
+  ENDIF
+  StringF(line, 'type    : DISK_INFO says "\s"\s\n', dtype,
+          IF win THEN '' ELSE ' (no window given)')
+  StrAdd(con, line)
+  -> the machine as exec reports it (on an accelerator or an emulator this
+  -> is what the OS was told, not a hardware probe)
+  af := Int(execbase + 296)
+  cpu := '68000'
+  IF af AND 1 THEN cpu := '68010'
+  IF af AND 2 THEN cpu := '68020'
+  IF af AND 4 THEN cpu := '68030'
+  IF af AND 8 THEN cpu := '68040'
+  IF af AND $80 THEN cpu := '68060'
+  StringF(line, 'machine : \s\s, exec \d.\d, chip \d KB / fast \d KB free\n', cpu,
+          IF af AND $70 THEN '+FPU' ELSE '', Int(execbase + 20), Int(execbase + 22),
+          Shr(AvailMem(MEMF_CHIP), 10), Shr(AvailMem(MEMF_FAST), 10))
+  StrAdd(con, line)
+  -> other tasks ready to run now: anything above 0 competes with the test
+  Forbid()
+  n := Long(execbase + 406)
+  WHILE n.succ
+    rdy++
+    n := n.succ
+  ENDWHILE
+  Permit()
+  StringF(line, 'busy    : \d other task\s ready to run at the start\n', rdy,
+          IF rdy = 1 THEN '' ELSE 's')
+  StrAdd(con, line)
+ENDPROC
+
+-> the $VER string in a handler file, if the file can be read (a ROM
+-> handler has a name but no file)
+PROC fileversion(name:PTR TO CHAR, dst:PTR TO CHAR)
+  DEF fh, buf:PTR TO CHAR, n, i, j, total=0, keep=0
+  buf := New(4100)
+  IF buf = NIL THEN RETURN
+  fh := Open(name, MODE_OLDFILE)
+  IF fh
+    -> read in 4K pieces; the last 5 bytes of a piece are kept in front of
+    -> the next so a "$VER:" across the seam is still found
+    WHILE (n := Read(fh, buf + keep, 4096 - keep)) > 0
+      n := n + keep
+      FOR i := 0 TO n - 6
+        IF (buf[i] = "$") AND (buf[i + 1] = "V") AND (buf[i + 2] = "E") AND
+           (buf[i + 3] = "R") AND (buf[i + 4] = ":")
+          i := i + 5
+          WHILE (i < n) AND (buf[i] = " ") DO i++
+          j := 0
+          WHILE (i < n) AND (buf[i] >= 32) AND (j < 70)
+            dst[j] := buf[i]
+            i++
+            j++
+          ENDWHILE
+          SetStr(dst, j)
+          Close(fh)
+          Dispose(buf)
+          RETURN
+        ENDIF
+      ENDFOR
+      CopyMem(buf + n - 5, buf, 5)
+      keep := 5
+      total := total + n
+      EXIT total > 400000
+    ENDWHILE
+    Close(fh)
+  ENDIF
+  Dispose(buf)
+ENDPROC
+
+-> ---------------------------------------------------------------
+-> BASE: an earlier run's CSV - the last rate seen per test name
+-> ---------------------------------------------------------------
+PROC readbase(name:PTR TO CHAR)
+  DEF fh, line[200]:STRING, f[8]:ARRAY OF LONG, i, k, p, q
+  fh := Open(name, MODE_OLDFILE)
+  IF fh = NIL
+    WriteF('conbench: no BASE file \s\n', name)
+    RETURN
+  ENDIF
+  WHILE Fgets(fh, line, 198)
+    SetStr(line, StrLen(line))
+    -> label,test,scale,bytes,best_ms,median_ms,bytes_per_s,check
+    p := InStr(line, ',')
+    IF p > 0
+      q := InStr(line, ',', p + 1)
+      IF q > p
+        FOR i := 0 TO NTESTS - 1
+          k := StrLen(testname(i))
+          IF (q - p - 1 = k) AND StrCmp(line + p + 1, testname(i), k)
+            -> the rate is the 7th field
+            k := q
+            FOR p := 1 TO 4 DO k := InStr(line, ',', k + 1)
+            IF k > 0 THEN baserate[i] := Val(line + k + 1)
+          ENDIF
+        ENDFOR
+      ENDIF
+    ENDIF
+  ENDWHILE
+  Close(fh)
+ENDPROC
+
+PROC writecsv(name:PTR TO CHAR, label:PTR TO CHAR, ds:PTR TO datestamp)
+  DEF t:PTR TO CHAR, i, line[200]:STRING, b, m
+  t := String(4096)
+  IF t = NIL THEN RETURN
+  FOR i := 0 TO done - 1
+    b := bestms(i)
+    m := medianms(i)
+    StringF(line, '\s,\s,\d,\d,\d,\d,\d,\s\n', label, testname(i), sc[i], bytes[i],
+            b, m, rateof(bytes[i], b), chkword(i))
+    StrAdd(t, line)
+  ENDFOR
+  appendto(name, t)
+  DisposeLink(t)
+ENDPROC
+
+-> ---------------------------------------------------------------
+-> the numbers
+-> ---------------------------------------------------------------
+PROC bestms(id)
+  DEF r, b=-1, v
+  FOR r := 0 TO cnt[id] - 1
+    v := ms[Mul(id, MAXREPS) + r]
+    IF (b < 0) OR (v < b) THEN b := v
+  ENDFOR
+ENDPROC Max(b, 0)
+
+PROC medianms(id)
+  DEF a[MAXREPS]:ARRAY OF LONG, r, i, v
+  FOR r := 0 TO cnt[id] - 1
+    v := ms[Mul(id, MAXREPS) + r]
+    i := r
+    WHILE (i > 0) AND (a[i - 1] > v)
+      a[i] := a[i - 1]
+      i--
+    ENDWHILE
+    a[i] := v
+  ENDFOR
+ENDPROC IF cnt[id] > 0 THEN a[Div(cnt[id], 2)] ELSE 0
+
+PROC worstms(id)
+  DEF r, w=0
+  FOR r := 0 TO cnt[id] - 1 DO w := Max(w, ms[Mul(id, MAXREPS) + r])
+ENDPROC w
+
+-> bytes per second from bytes and milliseconds, without overflow
+PROC rateof(b, t)
+  IF t <= 0 THEN RETURN 0
+ENDPROC Mul(Div(b, t), 1000) + Div(Mul(Mod(b, t), 1000), t)
+
+PROC chkword(id)
+  SELECT chk[id]
+  CASE 1; RETURN 'ok'
+  CASE 2; RETURN 'BAD'
+  CASE 3; RETURN '?'
+  ENDSELECT
+ENDPROC '-'
+
+-> log2 of x in 1/256ths (x >= 1): the integer part from the highest bit,
+-> the fraction by repeated squaring of the normalised mantissa
+PROC log2fix(x)
+  DEF p=0, m, i, r
+  IF x < 1 THEN RETURN 0
+  m := x
+  WHILE m > 1
+    m := Shr(m, 1)
+    p++
+  ENDWHILE
+  -> the mantissa as 1.14 fixed point in [16384, 32768)
+  IF p > 14 THEN m := Shr(x, p - 14) ELSE m := Shl(x, 14 - p)
+  r := Shl(p, 8)
+  FOR i := 7 TO 0 STEP -1
+    m := Shr(Mul(m, m), 14)
+    IF m >= 32768
+      m := Shr(m, 1)
+      r := r OR Shl(1, i)
+    ENDIF
+  ENDFOR
+ENDPROC r
+
+-> the x with log2fix(x) closest to y, by bisection
+PROC exp2fix(y)
+  DEF lo=1, hi=$7FFFFFFF, mid
+  WHILE lo < hi
+    mid := lo + Shr(hi - lo, 1)
+    IF log2fix(mid) < y THEN lo := mid + 1 ELSE hi := mid
+  ENDWHILE
+ENDPROC lo
+
 PROC addres(s:PTR TO CHAR)
   IF (StrLen(res) + StrLen(s)) < (RESSZ - 2) THEN StrAdd(res, s)
 ENDPROC
 
--> centiseconds as "s.cc". Hand-built rather than StringF's \z, which
--> turned out to apply zero-padding to EVERY field in the format string,
--> not just the one it precedes.
-PROC fmtsecs(dst:PTR TO CHAR, cs)
+-> milliseconds as "s.mmm"
+PROC fmtms(dst:PTR TO CHAR, t)
   DEF f
-  f := Mod(cs, 100)
-  IF f < 10
-    StringF(dst, '\d.0\d', Div(cs, 100), f)
-  ELSE
-    StringF(dst, '\d.\d', Div(cs, 100), f)
-  ENDIF
+  f := Mod(t, 1000)
+  StringF(dst, '\d.\s\s\d', Div(t, 1000), IF f < 100 THEN '0' ELSE '',
+          IF f < 10 THEN '0' ELSE '', f)
 ENDPROC
 
-vers: CHAR '$VER: conbench 0.3 (23.7.26) console speed benchmark', 0
+-> a ratio as "x.xx"
+PROC fmtratio(dst:PTR TO CHAR, a, b)
+  DEF h
+  IF b <= 0
+    StrCopy(dst, '')
+    RETURN
+  ENDIF
+  h := Div(Mul(Div(a, 100), 100), Max(Div(b, 100), 1))  -> hundredths, no overflow
+  StringF(dst, '\d.\s\d', Div(h, 100), IF Mod(h, 100) < 10 THEN '0' ELSE '', Mod(h, 100))
+ENDPROC
 
-PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
-  DEF i, t, cs, rate, tot=0, totb=0, d[LEN_DATSTRING]:ARRAY OF CHAR,
-      tm[LEN_DATSTRING]:ARRAY OF CHAR, sz[64]:STRING,
-      flag:PTR TO CHAR, dt:datetime, secs[16]:STRING,
-      nb[20]:STRING, nr[20]:STRING
+vers: CHAR '$VER: conbench 0.4 (25.10.26) console speed benchmark', 0
+
+PROC report(label:PTR TO CHAR, reps, scale, mintime, ds:PTR TO datestamp)
+  DEF i, t, tot=0, totb=0, d[LEN_DATSTRING]:ARRAY OF CHAR,
+      tm[LEN_DATSTRING]:ARRAY OF CHAR, sz[64]:STRING, dt:datetime,
+      secs[16]:STRING, med[16]:STRING, nb[20]:STRING, nr[20]:STRING,
+      sx[12]:STRING, rt[12]:STRING, flag:PTR TO CHAR, lg=0, nlg=0, lgb=0, nb2=0,
+      b, ver[40]:STRING
 
   StrCopy(res, '')
-  -> dat_Stamp is the FIRST field of a datetime, so the whole stamp
-  -> copies straight in; setting the three fields individually would
-  -> work too but this cannot get the order wrong.
   CopyMem(ds, dt, SIZEOF datestamp)
   dt.format := FORMAT_DOS
   dt.flags := 0
@@ -628,9 +934,9 @@ PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
   d[0] := 0
   tm[0] := 0
   IF DateToStr(dt) = 0
-    d[0] := "?"                     -> plain arrays: DateToStr writes a C
-    d[1] := 0                       -> string into them, so they have no
-    tm[0] := "?"                    -> E-string header for StrCopy to find
+    d[0] := "?"
+    d[1] := 0
+    tm[0] := "?"
     tm[1] := 0
   ENDIF
   IF cols > 0
@@ -642,65 +948,85 @@ PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
   ELSE
     StrCopy(sz, '?x? (console did not answer)')
   ENDIF
+  -> the version once: from the $VER string ("conbench 0.4")
+  StrCopy(ver, {vers} + 6, 12)
 
   addres('==========================================================\n')
-  StringF(scratch, 'console : \s   (conbench 0.3)\n', label)
+  StringF(scratch, 'console : \s   (\s)\n', label, ver)
   addres(scratch)
   StringF(scratch, 'when    : \s \s\n', d, tm)
   addres(scratch)
+  addres(con)
   StringF(scratch, 'window  : \s\n', sz)
   addres(scratch)
   IF (cols > 1) AND (cols < 79)
-    -> the trap that cost the 1.2.2 campaign a day of wrong arithmetic:
-    -> the line tests write 78-char lines, and in a narrower window
-    -> every one of them wraps - two rows, two scrolls, and the whole
-    -> table quietly measures something else. Say so IN the file.
-    StringF(scratch, 'WARNING : only \d cols - the 78-char line tests WRAP\n',
-            cols)
+    StringF(scratch, 'WARNING : only \d cols - the 78-char line tests WRAP\n', cols)
     addres(scratch)
     addres('          (widen the window past 78 text columns to compare)\n')
   ENDIF
-  StringF(scratch, 'run     : reps \d, scale \d, sync \s\n',
-          reps, scale, IF dosync THEN 'ON' ELSE 'off')
+  IF scale
+    StringF(scratch, 'run     : reps \d, scale \d, sync \s\n', reps, scale,
+            IF dosync THEN 'ON' ELSE 'off')
+  ELSE
+    StringF(scratch, 'run     : reps \d, auto-scaled to \d s or more a test, sync \s\n',
+            reps, mintime, IF dosync THEN 'ON' ELSE 'off')
+  ENDIF
   addres(scratch)
-  addres('  (best of the reps for each test; ? = under half a\n')
-  addres('   second, too short to trust - raise SCALE)\n')
-  addres('\n')
-  addres('  test              bytes    secs      bytes/s\n')
-  addres('  --------------------------------------------------\n')
-
-  FOR i := 0 TO NTESTS - 1
-    t := best[i]
-    IF t < 0 THEN t := 0
-    cs := Mul(t, 2)                 -> ticks are 20ms, so 2 centiseconds
-    IF t > 0 THEN rate := Div(Mul(bytes[i], 50), t) ELSE rate := 0
-    flag := IF t < SLOWTICKS THEN '?' ELSE ' '
-    fmtsecs(secs, cs)
-    -> numbers go through \s, not \d: a [n] field width on \d pads with
-    -> ZEROES in E-VO ("000032232"), which reads like a serial number.
-    -> \s pads with spaces, so the columns line up and still look like
-    -> quantities.
-    StringF(nb, '\d', bytes[i])
-    StringF(nr, '\d', rate)
-    StringF(scratch, '  \l\s[13]\r\s[9] \r\s[7]\s \r\s[10]\n',
-            testname(i), nb, secs, flag, nr)
+  IF broke
+    StringF(scratch, 'STOPPED : Ctrl-C after \d of \d tests\n', done, NTESTS)
     addres(scratch)
-    tot := tot + t
+  ENDIF
+  addres('  (secs = the best of the reps, median beside it; ~ = reps differ\n')
+  addres('   by over 10%; ? = under 0.1 s; check = cursor where it must be)\n')
+  addres('\n')
+  addres('  test          scale     bytes     secs   median    bytes/s check  vs base\n')
+  addres('  ------------------------------------------------------------------------\n')
+
+  FOR i := 0 TO done - 1
+    b := bestms(i)
+    t := worstms(i)
+    flag := ' '
+    IF Mul(t - b, 10) > b THEN flag := '~'
+    IF b < SHORTMS THEN flag := '?'
+    fmtms(secs, b)
+    fmtms(med, medianms(i))
+    StringF(sx, '\d', sc[i])
+    StringF(nb, '\d', bytes[i])
+    StringF(nr, '\d', rateof(bytes[i], b))
+    fmtratio(rt, rateof(bytes[i], b), baserate[i])
+    StringF(scratch, '  \l\s[12]\r\s[6]\r\s[10]\r\s[9]\s\r\s[8]\r\s[11] \l\s[5] \r\s[7]\n',
+            testname(i), sx, nb, secs, flag, med, nr, chkword(i), rt)
+    addres(scratch)
+    IF chk[i] = 2
+      StringF(scratch, '      cursor at \d;\d, should be \d;\d\n', Div(chkgot[i], 1000),
+              Mod(chkgot[i], 1000), Div(chkwant[i], 1000), Mod(chkwant[i], 1000))
+      addres(scratch)
+    ENDIF
+    tot := tot + b
     totb := totb + bytes[i]
+    IF rateof(bytes[i], b) > 0
+      lg := lg + log2fix(rateof(bytes[i], b))
+      nlg++
+      IF baserate[i] > 0
+        lgb := lgb + log2fix(baserate[i])
+        nb2++
+      ENDIF
+    ENDIF
   ENDFOR
 
-  addres('  --------------------------------------------------\n')
-  cs := Mul(tot, 2)
-  IF tot > 0 THEN rate := Div(Mul(totb, 50), tot) ELSE rate := 0
-  fmtsecs(secs, cs)
+  addres('  ------------------------------------------------------------------------\n')
+  fmtms(secs, tot)
   StringF(nb, '\d', totb)
-  StringF(nr, '\d', rate)
-  StringF(scratch, '  \l\s[13]\r\s[9] \r\s[7]  \r\s[10]\n',
-          'TOTAL', nb, secs, nr)
+  StringF(nr, '\d', rateof(totb, tot))
+  StringF(scratch, '  \l\s[12]      \r\s[10]\r\s[9]          \r\s[11]\n', 'TOTAL', nb, secs, nr)
   addres(scratch)
+  IF nlg > 0
+    StringF(nr, '\d', exp2fix(Div(lg, nlg)))
+    StrCopy(rt, '')
+    IF nb2 = nlg THEN fmtratio(rt, exp2fix(Div(lg, nlg)), exp2fix(Div(lgb, nb2)))
+    StringF(scratch, '  \l\s[37]\r\s[11]       \r\s[7]\n', 'geometric mean of the rates', nr, rt)
+    addres(scratch)
+  ENDIF
   addres('\n')
-
-  -> the same table to the screen, so the run is readable without
-  -> going to fetch the file
   WriteF('\s', res)
 ENDPROC

@@ -4,7 +4,14 @@
 that is a note, not a fault (CCON knowing sync-line's shape). Verified in FS-UAE 3.2.1 in CCON
 1.3.1b3 and the stock CON:: all checks ok, auto-scale sensible (its first try scaled scroll-nl
 125x on CCON because the trial had no barrier - fixed), Ctrl-C reports what was done, BASE ratios
-and the geometric mean shown; the setup lines read right on Workbench 2.05 / 68000 too (A600). The new tests are still to be chosen (the user's call).
+and the geometric mean shown; the setup lines read right on Workbench 2.05 / 68000 too (A600). **The new tests are in 0.4 too** (the user chose all of the first group plus the full-screen,
+responsiveness and robustness ones; CPU-left, key latency, resize and session replay left out):
+sgr-styles, tabs, latin1, short-lines, scroll-cmd, cursor-hide, query-cursor, mode-switch,
+garbage. Found while testing them: auto-scale needs a second, doubling step on the first real
+rep (a deferring console took garbage in 0.017 s, then drew it at 29 KB/s), and E-VO's Mod is
+wrong for divisors over 65535 (a 86 s row showed 21 bytes/s for 746) - rateof() avoids Mod.
+First results in FS-UAE 3.2.1 (68020, 640x256x2): the stock CON: draws latin1 at 746 bytes/s,
+3.4x slower than plain ASCII lines; CCON switches raw mode at 275/s against stock's 1012/s.
 **Later, the user's idea:** a WhichAmiga-style machine section (CPU, chipset, board, expansion
 cards) - only from what the system already knows (exec, expansion.library's ConfigDev list,
 graphics' ChipRevBits), never by poking hardware: WhichAmiga's probes crash a PiStorm or a 060.

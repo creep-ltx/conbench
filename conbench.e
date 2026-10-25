@@ -31,7 +31,13 @@
      time, so packet cost leaked into the "pure scroll" row); clear-page
      and cursor-pos are sized to the probed window; insdel-char cannot
      divide by zero in a two-row window; rates cannot overflow
-   0.4 totals are NOT comparable with 0.3 ones (other sizes, scroll-nl).
+   - nine NEW tests: sgr-styles (bold/italic/underline/inverse and
+     background colours), tabs, latin1 (letters 160-255), short-lines,
+     scroll-cmd (CSI S/T), cursor-hide (CSI 0 SPACE p around a frame),
+     query-cursor (CSI 6n round trips), mode-switch (SetMode on/off) and
+     garbage (random bytes the console must survive)
+   0.4 totals are NOT comparable with 0.3 ones (other sizes, scroll-nl,
+   the new tests).
 
    Run it INSIDE the console you want to measure - it writes its test
    output to stdout, so the console under test is whichever one the
@@ -58,7 +64,9 @@ CONST BLKSZ=4096,           -> the big-write buffer
       LONGLINE=300,         -> the auto-wrap test's line length
       NLSZ=1000,            -> scroll-nl's newlines per write
       RESSZ=16384,          -> the results text accumulated in memory
-      NTESTS=15,
+      NTESTS=24,
+      LATSZ=237,            -> latin1: three 79-byte lines of letters 160-255
+      GSZ=4096,             -> garbage: the random bytes, made once (fixed seed)
       MAXREPS=20,
       MAXSCALE=2000,        -> auto-scale never goes past this
       SHORTMS=100           -> a result under this is flagged '?'
@@ -68,9 +76,12 @@ DEF out,                    -> the console under test (stdout)
     big:PTR TO CHAR,        -> BIGSZ of the same filler
     longl:PTR TO CHAR,      -> LONGLINE printable chars, no newline
     nls:PTR TO CHAR,        -> NLSZ newlines
+    lat:PTR TO CHAR,        -> LATSZ: latin1's lines
+    gar:PTR TO CHAR,        -> GSZ: garbage's bytes
+    qfail=FALSE,            -> query-cursor: the console stopped answering
     res:PTR TO CHAR,        -> results text, written at the very end
     scratch[400]:STRING,
-    ms[300]:ARRAY OF LONG,  -> NTESTS * MAXREPS times, milliseconds
+    ms[480]:ARRAY OF LONG,  -> NTESTS * MAXREPS times, milliseconds
     sc[NTESTS]:ARRAY OF LONG,   -> each test's scale
     bytes[NTESTS]:ARRAY OF LONG,
     chk[NTESTS]:ARRAY OF LONG,  -> 0 not checked, 1 ok, 2 BAD, 3 no answer
@@ -88,7 +99,7 @@ DEF out,                    -> the console under test (stdout)
 
 PROC main() HANDLE
   DEF rdargs=NIL, argarray:PTR TO LONG, label:PTR TO CHAR, fname:PTR TO CHAR,
-      reps, scale, p:PTR TO LONG, i, r, t, fh, ds:datestamp, mintime,
+      reps, scale, p:PTR TO LONG, i, r, t, k, fh, ds:datestamp, mintime,
       csvname:PTR TO CHAR, basename:PTR TO CHAR, ev[2]:ARRAY OF LONG
 
   argarray := [0,0,0,0,0,0,0,0,0]:LONG
@@ -144,8 +155,11 @@ PROC main() HANDLE
   big := New(BIGSZ + 4)
   longl := New(LONGLINE + 4)
   nls := New(NLSZ + 4)
+  lat := New(LATSZ + 4)
+  gar := New(GSZ + 4)
   res := String(RESSZ)
-  IF (blk = NIL) OR (big = NIL) OR (longl = NIL) OR (nls = NIL) OR (res = NIL)
+  IF (blk = NIL) OR (big = NIL) OR (longl = NIL) OR (nls = NIL) OR (res = NIL) OR
+     (lat = NIL) OR (gar = NIL)
     Throw("MEM", 'out of memory')
   ENDIF
   fillbuffers()
@@ -173,7 +187,25 @@ PROC main() HANDLE
   FOR r := 0 TO reps - 1
     FOR i := 0 TO NTESTS - 1
       IF broke = FALSE
-        ms[Mul(i, MAXREPS) + r] := timetest(i, sc[i])
+        t := timetest(i, sc[i])
+        -> auto-scale's second step, on the first rep: the trial ended
+        -> with a barrier, these reps do not (without SYNC) - a console
+        -> that accepts bytes ahead of drawing them takes a small workload
+        -> in no time (garbage: 0.017 s). Grow it until the work no
+        -> longer fits its buffer and has to be drawn on the clock.
+        IF (scale = 0) AND (r = 0)
+          k := 0
+          -> doubled, not multiplied: the time is near nothing until the
+          -> buffer is full and then grows with the work, so a big step
+          -> overshoots (ten times made garbage take 10 s) and scaling back
+          -> lands inside the buffer again (0.017 s)
+          WHILE (t < Mul(mintime, 500)) AND (sc[i] < MAXSCALE) AND (k < 7) AND (broke = FALSE)
+            sc[i] := Min(MAXSCALE, Mul(sc[i], 2))
+            t := timetest(i, sc[i])
+            k++
+          ENDWHILE
+        ENDIF
+        ms[Mul(i, MAXREPS) + r] := t
         IF broke = FALSE
           cnt[i] := r + 1
           IF r = 0 THEN done := i + 1
@@ -256,6 +288,71 @@ PROC fillbuffers()
   longl[LONGLINE] := 0
   FOR i := 0 TO NLSZ - 1 DO nls[i] := 10
   nls[NLSZ] := 0
+  -> latin1: 78 letters from 160-255 (a Swedish listing's a-ring, a- and
+  -> o-umlaut among them), a LF, three lines that differ
+  c := 160
+  FOR i := 0 TO LATSZ - 1
+    IF Mod(i, 79) = 78
+      lat[i] := 10
+    ELSE
+      lat[i] := c
+      c := c + 1
+      IF c > 255 THEN c := 160
+    ENDIF
+  ENDFOR
+  lat[LATSZ] := 0
+  -> garbage: the same "random" bytes every run (a fixed seed), mostly
+  -> text and the insides of escape sequences. Left out on purpose: the
+  -> bytes that would change the console for the REST of the run or ask
+  -> it things - final bytes h l (modes), t u (page size), { } (input
+  -> events), n q (reports), > (private: the window's background pen) -
+  -> and BEL, whose flashes help nobody. The run resets the console after
+  -> (garbagereset), so what is left is what a console must survive.
+  c := 12345
+  FOR i := 0 TO GSZ - 1
+    c := Mul(c, 1103515245) + 12345
+    gar[i] := garbagebyte(Shr(c, 16) AND $7FFF)
+  ENDFOR
+  gar[GSZ] := 0
+ENDPROC
+
+PROC garbagebyte(r)
+  DEF k, b, ins:PTR TO CHAR, ctl:PTR TO CHAR
+  ins := '0123456789;; ?['
+  ctl := [8, 9, 10, 13, 12, 11, 14, 15, 0, 1]:CHAR
+  k := Mod(r, 100)
+  IF k < 50
+    b := 32 + Mod(Shr(r, 7), 95)      -> printable ASCII
+  ELSEIF k < 60
+    b := 27                           -> ESC
+  ELSEIF k < 65
+    b := $9B                          -> CSI
+  ELSEIF k < 78
+    b := ins[Mod(Shr(r, 7), 15)]      -> sequence insides
+  ELSEIF k < 86
+    b := 128 + Mod(Shr(r, 7), 128)    -> 8-bit bytes
+  ELSE
+    b := ctl[Mod(Shr(r, 7), 10)]      -> controls
+  ENDIF
+  IF (b = "h") OR (b = "l") OR (b = "t") OR (b = "u") OR (b = "{") OR
+     (b = "}") OR (b = "n") OR (b = "q") OR (b = ">") OR (b = 7) THEN b := "x"
+ENDPROC b
+
+-> after garbage: the console back to normal (reset, plain colours, the
+-> normal character set, cursor on, a clear page) and anything it put in
+-> the input queue read away, so the next test - and the shell after the
+-> run - start clean
+PROC garbagereset()
+  DEF in, b[4]:ARRAY OF CHAR, k=0
+  Write(out, [27,"c",27,"[","0","m",15,27,"[",32,"p",12]:CHAR, 12)
+  IF probeskip THEN RETURN
+  in := Input()
+  SetMode(in, 1)
+  WHILE (WaitForChar(in, 20000) <> 0) AND (k < 4096)
+    Read(in, b, 1)
+    k++
+  ENDWHILE
+  SetMode(in, 0)
 ENDPROC
 
 -> ---------------------------------------------------------------
@@ -307,6 +404,7 @@ PROC timetest(id, scale, bar=FALSE)
   IF dosync OR bar THEN WaitForChar(out, 0)
   t1 := nowticks()
   bytes[id] := n
+  IF id = 23 THEN garbagereset()    -> untimed, after every garbage run
 ENDPROC Div(t1 - t0, freqk)
 
 -> ---------------------------------------------------------------
@@ -472,7 +570,135 @@ PROC dotest(id, scale)
       n := n + 79
       IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
     ENDFOR
+  CASE 15
+    -> SGR-STYLES: bold, italic, underline, inverse and their "off" codes,
+    -> with a text AND a background colour, 8 pieces a line - ls colours,
+    -> prompts, Ed's marked block; sgr-colour only times text colours
+    FOR i := 1 TO Mul(300, scale)
+      StrCopy(line2, '')
+      FOR k := 0 TO 7
+        StringF(tmp, '\c[\d;3\d;4\dmabcdefgh', 27,
+                ListItem([1, 3, 4, 7, 22, 23, 24, 27], k), k, Mod(k + 3, 8))
+        StrAdd(line2, tmp)
+      ENDFOR
+      StringF(tmp, '\c[0m\n', 27)
+      StrAdd(line2, tmp)
+      Write(out, line2, StrLen(line2))
+      n := n + StrLen(line2)
+      IF (i AND 31) = 0 THEN IF brk() THEN RETURN n
+    ENDFOR
+  CASE 16
+    -> TABS: List-like lines with three TABs - TAB expansion is its own path
+    FOR i := 1 TO Mul(700, scale)
+      StringF(s, 'file\d\t\d\t----rwed\t24-Oct-26\n', Mod(i, 1000), Mul(Mod(i, 97), 131))
+      Write(out, s, StrLen(s))
+      n := n + StrLen(s)
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
+    ENDFOR
+  CASE 17
+    -> LATIN1: plain-lines' shape with letters 160-255 - glyphs past ASCII
+    FOR i := 1 TO Mul(NLINES, scale)
+      Write(out, lat + Mul(Mod(i, 3), 79), 79)
+      n := n + 79
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
+    ENDFOR
+  CASE 18
+    -> SHORT-LINES: a few characters a line, one Write() each - a list of
+    -> names, echo in a script: the cost per line, not per glyph
+    FOR i := 1 TO Mul(2000, scale)
+      StringF(s, 'f\d\n', Mod(i, 1000))
+      Write(out, s, StrLen(s))
+      n := n + StrLen(s)
+      IF (i AND 255) = 0 THEN IF brk() THEN RETURN n
+    ENDFOR
+  CASE 19
+    -> SCROLL-CMD: a screenful, then CSI 2 S / CSI 2 T (scroll up/down two
+    -> lines) in pairs - how pagers and editors move a page
+    Write(out, [27,"[","H"]:CHAR, 3)
+    FOR j := 1 TO Max(1, fr - 2)
+      Write(out, blk, 79)
+      n := n + 79
+    ENDFOR
+    FOR i := 1 TO Mul(150, scale)
+      Write(out, [27,"[","2","S",27,"[","2","T"]:CHAR, 8)
+      n := n + 8
+      IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
+    ENDFOR
+  CASE 20
+    -> CURSOR-HIDE: vt-frame with the cursor off (CSI 0 SPACE p) while a
+    -> frame is drawn and on again after, as editors draw
+    FOR i := 1 TO Mul(15, scale)
+      Write(out, [27,"[","0",32,"p"]:CHAR, 5)
+      n := n + 5
+      FOR j := 1 TO fr
+        StringF(s, '\c[\d;1H\c[K', 27, j, 27)
+        k := StrLen(s)
+        CopyMem(longl + Mod(Mul(j, 7) + i, 240), s + k, Min(60, fc - 1))
+        SetStr(s, k + Min(60, fc - 1))
+        Write(out, s, StrLen(s))
+        n := n + StrLen(s)
+      ENDFOR
+      Write(out, [27,"[",32,"p"]:CHAR, 4)
+      n := n + 4
+      IF brk() THEN RETURN n
+    ENDFOR
+  CASE 21
+    -> QUERY-CURSOR: CSI 6n and its answer read back, again and again -
+    -> ls, More and csh ask at every prompt. "bytes" counts round trips.
+    n := querycursor(Mul(200, scale))
+  CASE 22
+    -> MODE-SWITCH: raw mode on, off - what every full-screen program pays
+    -> starting and quitting. "bytes" counts switches (on and off = one).
+    IF probeskip = FALSE
+      j := Input()
+      FOR i := 1 TO Mul(200, scale)
+        SetMode(j, 1)
+        SetMode(j, 0)
+        n++
+        IF (i AND 63) = 0 THEN IF brk() THEN RETURN n
+      ENDFOR
+    ENDIF
+  CASE 23
+    -> GARBAGE: random bytes and broken sequences, 512 bytes a write. The
+    -> console must survive it: the check asks it where its cursor is
+    -> after the reset (garbagereset), which a hung console cannot answer.
+    FOR i := 1 TO Mul(4, scale)
+      FOR j := 0 TO 7
+        Write(out, gar + Mul(j, 512), 512)
+        n := n + 512
+      ENDFOR
+      IF brk() THEN RETURN n
+    ENDFOR
   ENDSELECT
+ENDPROC n
+
+-> query-cursor's loop: raw on Input once, CSI 6n, read to the final R;
+-> a console that does not answer within half a second ends the test
+PROC querycursor(count)
+  DEF in, i, n=0, c[4]:ARRAY OF CHAR, ok
+  qfail := FALSE
+  IF probeskip THEN RETURN 0
+  in := Input()
+  SetMode(in, 1)
+  FOR i := 1 TO count
+    Write(out, [27,"[","6","n"]:CHAR, 4)
+    ok := FALSE
+    WHILE ok = FALSE
+      IF WaitForChar(in, 500000) = 0
+        qfail := TRUE
+        ok := TRUE
+      ELSEIF Read(in, c, 1) <> 1
+        qfail := TRUE
+        ok := TRUE
+      ELSEIF c[0] = "R"
+        ok := TRUE
+      ENDIF
+    ENDWHILE
+    EXIT qfail
+    n++
+    IF (i AND 63) = 0 THEN IF brk() THEN i := count
+  ENDFOR
+  SetMode(in, 0)
 ENDPROC n
 
 PROC testname(id)
@@ -493,6 +719,15 @@ PROC testname(id)
   CASE 12; s := 'clear-page'
   CASE 13; s := 'erase-eol'
   CASE 14; s := 'sync-line'
+  CASE 15; s := 'sgr-styles'
+  CASE 16; s := 'tabs'
+  CASE 17; s := 'latin1'
+  CASE 18; s := 'short-lines'
+  CASE 19; s := 'scroll-cmd'
+  CASE 20; s := 'cursor-hide'
+  CASE 21; s := 'query-cursor'
+  CASE 22; s := 'mode-switch'
+  CASE 23; s := 'garbage'
   DEFAULT; s := '?'
   ENDSELECT
 ENDPROC s
@@ -590,6 +825,15 @@ PROC check(id)
   CASE 6;  loose := TRUE    -> not checked
   CASE 7;  loose := TRUE
   CASE 14; loose := TRUE
+  CASE 15; loose := TRUE
+  CASE 16; loose := TRUE
+  CASE 17; loose := TRUE
+  CASE 18; loose := TRUE
+  CASE 20; want := Mul(fr, 1000) + 1 + Min(60, fc - 1)   -> as vt-frame
+  CASE 21
+    chk[id] := IF qfail THEN 3 ELSE 1   -> every question answered
+    RETURN
+  CASE 23; loose := TRUE    -> after the reset: it answers at all
   CASE 8
     -> the last '-cursor-' was written at row/col of i = 700*scale
     want := Mul(Mod(Mul(700, n), fr) + 1, 1000) + Mod(Mul(700, n), Max(1, fc - 8)) + 1 + 8
@@ -848,10 +1092,14 @@ PROC worstms(id)
   FOR r := 0 TO cnt[id] - 1 DO w := Max(w, ms[Mul(id, MAXREPS) + r])
 ENDPROC w
 
--> bytes per second from bytes and milliseconds, without overflow
+-> bytes per second from bytes and milliseconds, without overflow. No
+-> Mod here: E-VO's Mod divides by the divisor's LOW WORD only, so a test
+-> over 65.5 s (stock CON:'s latin1, 86 s) gave 21 bytes/s for 746
 PROC rateof(b, t)
+  DEF q
   IF t <= 0 THEN RETURN 0
-ENDPROC Mul(Div(b, t), 1000) + Div(Mul(Mod(b, t), 1000), t)
+  q := Div(b, t)
+ENDPROC Mul(q, 1000) + Div(Mul(b - Mul(q, t), 1000), t)
 
 PROC chkword(id)
   SELECT chk[id]
@@ -978,6 +1226,7 @@ PROC report(label:PTR TO CHAR, reps, scale, mintime, ds:PTR TO datestamp)
   ENDIF
   addres('  (secs = the best of the reps, median beside it; ~ = reps differ\n')
   addres('   by over 10%; ? = under 0.1 s; check = cursor where it must be)\n')
+  addres('  (query-cursor and mode-switch count round trips in "bytes")\n')
   addres('\n')
   addres('  test          scale     bytes     secs   median    bytes/s check  vs base\n')
   addres('  ------------------------------------------------------------------------\n')

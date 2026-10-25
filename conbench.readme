@@ -4,9 +4,11 @@ conbench - console speed benchmark for AmigaOS
 WHAT IT IS
 
   conbench times a console handler from the client side of the
-  packet interface: fifteen workloads, from plain line output and
-  4K/32K block writes to colour runs, full-screen editor repaints,
-  insert/delete blits and a per-line render barrier. Run it inside
+  packet interface: twenty-four workloads, from plain line output and
+  4K/32K block writes to colour runs and text styles, TABs, accented
+  letters, full-screen editor repaints, insert/delete blits, a
+  per-line render barrier, the cursor query every prompt asks, raw
+  mode switches - and a stream of garbage the console must survive. Run it inside
   CON:, CCON:, KingCON, ViNCEd, CTerm or anything else that speaks the
   console packet protocol; results append to one file so consoles
   can be read side by side. Written in Amiga E, a native AmigaOS
@@ -49,7 +51,9 @@ HISTORY
 
   0.4  (25.10.26) EClock timing, auto-scale, a barrier before every
        test, Ctrl-C, best and median, the cursor check, the setup
-       recorded, geometric mean, CSV and BASE; not comparable with 0.3
+       recorded, geometric mean, CSV and BASE; nine new tests
+       (sgr-styles, tabs, latin1, short-lines, scroll-cmd, cursor-hide,
+       query-cursor, mode-switch, garbage); not comparable with 0.3
 
   0.3  (23.7.26) each test names itself in the window; own tool now
   0.2  suite doubled, six new tests, the window probe works

@@ -1,7 +1,7 @@
 # conbench
 
 A console speed benchmark for AmigaOS — CON:, CCON:, KingCON,
-ViNCEd, CTerm, or any other DOS console handler. Fifteen workloads,
+ViNCEd, CTerm, or any other DOS console handler. Twenty-four workloads,
 from plain `dir`-style line output to full-screen editor repaints,
 timed from the client side of the packet interface, with the tooling
 to tell an honestly fast console from one that is merely quick to say
@@ -66,8 +66,13 @@ stopped.
 **Auto-scale:** without `SCALE`, each test first runs once at size 1
 (ended by a barrier, so a console that draws behind its replies
 cannot make it look free), is grown tenfold until it takes 0.2 s, and
-is then sized to take `MINTIME` seconds. The table shows each test's
-scale and its bytes per second, which do not depend on the size.
+is then sized to take `MINTIME` seconds. If the first real repeat
+(without a barrier, unless `SYNC`) still takes under half of that, the
+size is doubled until it does: a console that accepts bytes ahead of
+drawing them takes a small workload in no time (CCON took 16 KB of
+`garbage` in 0.017 s, then drew it at 29 KB/s once the work no longer
+fit its buffer). The table shows each test's scale and its bytes per
+second, which do not depend on the size.
 
 ## Sample output
 
@@ -123,6 +128,15 @@ run     : reps 2, auto-scaled to 1 s or more a test, sync off
 | `clear-page` | form feed + a screenful of the probed window (rows less one), 40 pages — the More page-flip path |
 | `erase-eol` | CR + text + erase-to-EOL — the progress-bar idiom |
 | `sync-line` | `plain-lines` with a render barrier after **every** line — see below |
+| `sgr-styles` | bold, italic, underline, inverse and their "off" codes, with a text and a background colour, 8 pieces a line — `ls` colours, prompts, Ed's marked block |
+| `tabs` | `List`-like lines with three TABs — TAB expansion is its own path |
+| `latin1` | `plain-lines`' shape with letters 160–255 (å, ä, ö, é…) — glyphs past ASCII |
+| `short-lines` | 2000 lines of a few characters, one `Write()` each — the cost per line, not per glyph |
+| `scroll-cmd` | a screenful, then CSI 2 S / CSI 2 T (scroll up/down) in pairs — how pagers and editors move a page |
+| `cursor-hide` | `vt-frame` with the cursor turned off while each frame is drawn (CSI 0 SPACE p … CSI SPACE p) |
+| `query-cursor` | CSI 6n and its answer read back, 200 times — what ls, More and csh ask at every prompt; "bytes" counts round trips |
+| `mode-switch` | raw mode on and off (SetMode), 200 times — what every full-screen program pays starting and quitting; "bytes" counts switches |
+| `garbage` | 4 KB of random bytes and broken escape sequences (the same every run), 512 bytes a write — the console must survive it: the check asks it for its cursor afterwards. Bytes that would change the console for the rest of the run (modes, page size, input events, reports, the window pen) and BEL are left out, and the console is reset after every run |
 
 ## Honesty — read this before believing a number
 
@@ -149,8 +163,10 @@ see through it:
 - The **check** column asks the console for its cursor (CSI `6n`)
   after the tests whose end state is known, outside the timing: `ok`,
   `BAD` (with where the cursor was and should be), `?` (no answer) or
-  `-` (not checked: bytewise, wrap-long and insdel-line end where
-  consoles may differ). The scrolling tests are only checked for
+  `-` (not checked: bytewise, wrap-long, insdel-line, scroll-cmd and
+  mode-switch end where consoles may differ). For `query-cursor` the
+  check is that every question was answered; for `garbage`, that the
+  console still answers after it. The scrolling tests are only checked for
   column 1 inside the window, because a console that scrolls in jumps
   (CCON) leaves the cursor above the bottom row until it settles;
   clear-page only in a window of 79 columns or more.
@@ -225,4 +241,6 @@ A prebuilt binary is included.
   best and median with a spread mark, the check column, the setup
   recorded, a geometric mean, CSV and BASE, scroll-nl in big writes,
   clear-page and cursor-pos sized to the window, no divide by zero in a
-  two-row window. Totals are not comparable with 0.3's.
+  two-row window; and nine new tests: sgr-styles, tabs, latin1,
+  short-lines, scroll-cmd, cursor-hide, query-cursor, mode-switch and
+  garbage. Totals are not comparable with 0.3's.

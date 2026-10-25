@@ -1159,7 +1159,14 @@ PROC fmtratio(dst:PTR TO CHAR, a, b)
     StrCopy(dst, '')
     RETURN
   ENDIF
-  h := Div(Mul(Div(a, 100), 100), Max(Div(b, 100), 1))  -> hundredths, no overflow
+  -> hundredths. Full precision below 20 million (a * 100 fits 32 bits);
+  -> only above that both are cut by 100 first. (0.4's first form cut
+  -> them always and showed 1012/275 as 5.00, 158/125 as 1.00.)
+  IF a < 20000000
+    h := Div(Mul(a, 100), b)
+  ELSE
+    h := Div(Mul(Div(a, 100), 100), Max(Div(b, 100), 1))
+  ENDIF
   StringF(dst, '\d.\s\d', Div(h, 100), IF Mod(h, 100) < 10 THEN '0' ELSE '', Mod(h, 100))
 ENDPROC
 

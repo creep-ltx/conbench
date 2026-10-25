@@ -89,6 +89,8 @@ DEF out,                    -> the console under test (stdout)
     baserate[NTESTS]:ARRAY OF LONG,
     done=0,                 -> tests with at least one rep, for the report
     cnt[NTESTS]:ARRAY OF LONG,  -> reps finished per test
+    sel[NTESTS]:ARRAY OF LONG,  -> TEST: the tests to run
+    testsel=NIL:PTR TO CHAR,    -> TEST's list as given, NIL = all
     broke=FALSE,            -> Ctrl-C seen
     dosync=FALSE,
     cols=0, rows=0,
@@ -102,8 +104,8 @@ PROC main() HANDLE
       reps, scale, p:PTR TO LONG, i, r, t, k, fh, ds:datestamp, mintime,
       csvname:PTR TO CHAR, basename:PTR TO CHAR, ev[2]:ARRAY OF LONG
 
-  argarray := [0,0,0,0,0,0,0,0,0]:LONG
-  rdargs := ReadArgs('NAME/A,TO/K,REPS/K/N,SCALE/K/N,MINTIME/K/N,SYNC/S,CSV/K,BASE/K,FORCE/S',
+  argarray := [0,0,0,0,0,0,0,0,0,0]:LONG
+  rdargs := ReadArgs('NAME/A,TO/K,REPS/K/N,SCALE/K/N,MINTIME/K/N,SYNC/S,CSV/K,BASE/K,FORCE/S,TEST/K',
                      argarray, NIL)
   IF rdargs = NIL
     Throw("ARG", 'usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [MINTIME n] [SYNC] [CSV file] [BASE file] [FORCE]')
@@ -176,17 +178,21 @@ PROC main() HANDLE
     baserate[i] := 0
   ENDFOR
   IF basename THEN readbase(basename)
+  -> TEST name,name,...: only these (a campaign measures one path over
+  -> and over); the others are skipped and not reported
+  testsel := argarray[9]
+  FOR i := 0 TO NTESTS - 1 DO sel[i] := IF testsel THEN inlist(testsel, testname(i)) ELSE TRUE
 
   -> AUTO-SCALE: one run of each test at scale 1 says what it costs;
   -> it is then sized to take at least MINTIME seconds
   IF scale = 0
-    FOR i := 0 TO NTESTS - 1 DO IF broke = FALSE THEN sc[i] := calibrate(i, Mul(mintime, 1000))
+    FOR i := 0 TO NTESTS - 1 DO IF (broke = FALSE) AND sel[i] THEN sc[i] := calibrate(i, Mul(mintime, 1000))
   ENDIF
 
   -> the suite, REPS times; a test's row is complete when all its reps ran
   FOR r := 0 TO reps - 1
     FOR i := 0 TO NTESTS - 1
-      IF broke = FALSE
+      IF (broke = FALSE) AND sel[i]
         t := timetest(i, sc[i])
         -> auto-scale's second step, on the first rep: the trial ended
         -> with a barrier, these reps do not (without SYNC) - a console
@@ -208,7 +214,7 @@ PROC main() HANDLE
         ms[Mul(i, MAXREPS) + r] := t
         IF broke = FALSE
           cnt[i] := r + 1
-          IF r = 0 THEN done := i + 1
+          IF r = 0 THEN done++
           IF r = (reps - 1) THEN check(i)   -> outside the timing, last rep
         ENDIF
       ENDIF
@@ -239,6 +245,29 @@ EXCEPT DO
   ENDIF
   IF rdargs THEN FreeArgs(rdargs)
 ENDPROC
+
+-> is word one of the comma-separated names in list (any case)?
+PROC inlist(list:PTR TO CHAR, word:PTR TO CHAR)
+  DEF i=0, j, n
+  n := StrLen(word)
+  WHILE list[i]
+    j := i
+    WHILE (list[j] <> 0) AND (list[j] <> ",") DO j++
+    IF (j - i = n) AND (StrCmp(list + i, word, n) OR icmpn(list + i, word, n)) THEN RETURN TRUE
+    i := IF list[j] THEN j + 1 ELSE j
+  ENDWHILE
+ENDPROC FALSE
+
+PROC icmpn(a:PTR TO CHAR, b:PTR TO CHAR, n)
+  DEF i, x, y
+  FOR i := 0 TO n - 1
+    x := a[i]
+    y := b[i]
+    IF (x >= "A") AND (x <= "Z") THEN x := x + 32
+    IF (y >= "A") AND (y <= "Z") THEN y := y + 32
+    IF x <> y THEN RETURN FALSE
+  ENDFOR
+ENDPROC TRUE
 
 PROC appendto(name, text:PTR TO CHAR)
   DEF fh
@@ -1052,12 +1081,14 @@ PROC writecsv(name:PTR TO CHAR, label:PTR TO CHAR, ds:PTR TO datestamp)
   DEF t:PTR TO CHAR, i, line[200]:STRING, b, m
   t := String(4096)
   IF t = NIL THEN RETURN
-  FOR i := 0 TO done - 1
-    b := bestms(i)
-    m := medianms(i)
-    StringF(line, '\s,\s,\d,\d,\d,\d,\d,\s\n', label, testname(i), sc[i], bytes[i],
-            b, m, rateof(bytes[i], b), chkword(i))
-    StrAdd(t, line)
+  FOR i := 0 TO NTESTS - 1
+    IF cnt[i] > 0
+      b := bestms(i)
+      m := medianms(i)
+      StringF(line, '\s,\s,\d,\d,\d,\d,\d,\s\n', label, testname(i), sc[i], bytes[i],
+              b, m, rateof(bytes[i], b), chkword(i))
+      StrAdd(t, line)
+    ENDIF
   ENDFOR
   appendto(name, t)
   DisposeLink(t)
@@ -1177,7 +1208,7 @@ PROC report(label:PTR TO CHAR, reps, scale, mintime, ds:PTR TO datestamp)
       tm[LEN_DATSTRING]:ARRAY OF CHAR, sz[64]:STRING, dt:datetime,
       secs[16]:STRING, med[16]:STRING, nb[20]:STRING, nr[20]:STRING,
       sx[12]:STRING, rt[12]:STRING, flag:PTR TO CHAR, lg=0, nlg=0, lgb=0, nb2=0,
-      b, ver[40]:STRING
+      b, ver[40]:STRING, nsel
 
   StrCopy(res, '')
   CopyMem(ds, dt, SIZEOF datestamp)
@@ -1227,8 +1258,14 @@ PROC report(label:PTR TO CHAR, reps, scale, mintime, ds:PTR TO datestamp)
             reps, mintime, IF dosync THEN 'ON' ELSE 'off')
   ENDIF
   addres(scratch)
+  IF testsel
+    StringF(scratch, 'tests   : only \s (TOTAL and the mean are not comparable with a full run)\n', testsel)
+    addres(scratch)
+  ENDIF
   IF broke
-    StringF(scratch, 'STOPPED : Ctrl-C after \d of \d tests\n', done, NTESTS)
+    nsel := 0
+    FOR i := 0 TO NTESTS - 1 DO IF sel[i] THEN nsel++
+    StringF(scratch, 'STOPPED : Ctrl-C after \d of \d tests\n', done, nsel)
     addres(scratch)
   ENDIF
   addres('  (secs = the best of the reps, median beside it; ~ = reps differ\n')
@@ -1238,34 +1275,36 @@ PROC report(label:PTR TO CHAR, reps, scale, mintime, ds:PTR TO datestamp)
   addres('  test          scale     bytes     secs   median    bytes/s check  vs base\n')
   addres('  ------------------------------------------------------------------------\n')
 
-  FOR i := 0 TO done - 1
-    b := bestms(i)
-    t := worstms(i)
-    flag := ' '
-    IF Mul(t - b, 10) > b THEN flag := '~'
-    IF b < SHORTMS THEN flag := '?'
-    fmtms(secs, b)
-    fmtms(med, medianms(i))
-    StringF(sx, '\d', sc[i])
-    StringF(nb, '\d', bytes[i])
-    StringF(nr, '\d', rateof(bytes[i], b))
-    fmtratio(rt, rateof(bytes[i], b), baserate[i])
-    StringF(scratch, '  \l\s[12]\r\s[6]\r\s[10]\r\s[9]\s\r\s[8]\r\s[11] \l\s[5] \r\s[7]\n',
-            testname(i), sx, nb, secs, flag, med, nr, chkword(i), rt)
-    addres(scratch)
-    IF chk[i] = 2
-      StringF(scratch, '      cursor at \d;\d, should be \d;\d\n', Div(chkgot[i], 1000),
-              Mod(chkgot[i], 1000), Div(chkwant[i], 1000), Mod(chkwant[i], 1000))
+  FOR i := 0 TO NTESTS - 1
+    IF cnt[i] > 0
+      b := bestms(i)
+      t := worstms(i)
+      flag := ' '
+      IF Mul(t - b, 10) > b THEN flag := '~'
+      IF b < SHORTMS THEN flag := '?'
+      fmtms(secs, b)
+      fmtms(med, medianms(i))
+      StringF(sx, '\d', sc[i])
+      StringF(nb, '\d', bytes[i])
+      StringF(nr, '\d', rateof(bytes[i], b))
+      fmtratio(rt, rateof(bytes[i], b), baserate[i])
+      StringF(scratch, '  \l\s[12]\r\s[6]\r\s[10]\r\s[9]\s\r\s[8]\r\s[11] \l\s[5] \r\s[7]\n',
+              testname(i), sx, nb, secs, flag, med, nr, chkword(i), rt)
       addres(scratch)
-    ENDIF
-    tot := tot + b
-    totb := totb + bytes[i]
-    IF rateof(bytes[i], b) > 0
-      lg := lg + log2fix(rateof(bytes[i], b))
-      nlg++
-      IF baserate[i] > 0
-        lgb := lgb + log2fix(baserate[i])
-        nb2++
+      IF chk[i] = 2
+        StringF(scratch, '      cursor at \d;\d, should be \d;\d\n', Div(chkgot[i], 1000),
+                Mod(chkgot[i], 1000), Div(chkwant[i], 1000), Mod(chkwant[i], 1000))
+        addres(scratch)
+      ENDIF
+      tot := tot + b
+      totb := totb + bytes[i]
+      IF rateof(bytes[i], b) > 0
+        lg := lg + log2fix(rateof(bytes[i], b))
+        nlg++
+        IF baserate[i] > 0
+          lgb := lgb + log2fix(baserate[i])
+          nb2++
+        ENDIF
       ENDIF
     ENDIF
   ENDFOR

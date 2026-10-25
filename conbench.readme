@@ -45,7 +45,8 @@ USAGE
   NAME/A, TO/K, REPS/K/N (default 3), SCALE/K/N (fixed size instead
   of auto-scaling), MINTIME/K/N (auto-scale target, default 1 s),
   SYNC/S, CSV/K (also write one line per test), BASE/K (an earlier
-  CSV to compare against), FORCE/S.
+  CSV to compare against), FORCE/S, TEST/K (only these tests, comma
+  separated: TEST insdel-line,mode-switch).
 
 HISTORY
 
@@ -53,7 +54,8 @@ HISTORY
        test, Ctrl-C, best and median, the cursor check, the setup
        recorded, geometric mean, CSV and BASE; nine new tests
        (sgr-styles, tabs, latin1, short-lines, scroll-cmd, cursor-hide,
-       query-cursor, mode-switch, garbage); not comparable with 0.3
+       query-cursor, mode-switch, garbage); TEST runs a chosen few;
+       not comparable with 0.3
 
   0.3  (23.7.26) each test names itself in the window; own tool now
   0.2  suite doubled, six new tests, the window probe works

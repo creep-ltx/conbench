@@ -42,7 +42,7 @@ conbench CON TO RAM:conbench.txt SYNC BASE RAM:ccon.csv
 
 ```
 conbench NAME <label> [TO file] [REPS n] [SCALE n] [MINTIME n] [SYNC]
-         [CSV file] [BASE file] [FORCE]
+         [CSV file] [BASE file] [FORCE] [TEST name,name,...]
 ```
 
 | Argument | Meaning |
@@ -56,6 +56,7 @@ conbench NAME <label> [TO file] [REPS n] [SCALE n] [MINTIME n] [SYNC]
 | `CSV file` | also append the run to file as one line per test (label, test, scale, bytes, best ms, median ms, bytes/s, check) |
 | `BASE file` | an earlier run's CSV: each row gets a "vs base" ratio, and the summary a ratio of the geometric means |
 | `FORCE` | allow a non-console stdout (smoke-testing under vamos); the numbers then mean nothing |
+| `TEST list` | run only these tests, e.g. `TEST insdel-line,mode-switch` (any case); the result file says so, as TOTAL and the mean then cover only those |
 
 The window names each running test, so the deliberately blank ones
 (`scroll-nl`, `insdel-line` — they scroll and blit *empty* rows by
@@ -243,4 +244,4 @@ A prebuilt binary is included.
   clear-page and cursor-pos sized to the window, no divide by zero in a
   two-row window; and nine new tests: sgr-styles, tabs, latin1,
   short-lines, scroll-cmd, cursor-hide, query-cursor, mode-switch and
-  garbage. Totals are not comparable with 0.3's.
+  garbage; TEST runs a chosen few. Totals are not comparable with 0.3's.
